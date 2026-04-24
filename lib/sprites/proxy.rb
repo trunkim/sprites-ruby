@@ -1,5 +1,15 @@
 # frozen_string_literal: true
 
+# 端口转发与 TCP 代理
+#
+# 通过 WebSocket 隧道将本地端口转发到 sprite 内的端口。
+# 支持单端口、多端口、以及原始 TCP socket 代理。
+#
+# @example 单端口转发
+#   session = sprite.proxy_port(3000, 3000)
+#   # 现在 localhost:3000 连接到 sprite 的 3000 端口
+#   session.close
+
 require "socket"
 require "json"
 

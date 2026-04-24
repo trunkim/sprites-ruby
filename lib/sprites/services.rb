@@ -1,5 +1,10 @@
 # frozen_string_literal: true
 
+# 服务管理（Service CRUD + 生命周期控制）
+#
+# 服务是 sprite 内的持久化后台进程（如 web server、数据库）。
+# 创建、启动、停止操作返回流式响应（ServiceStream），可实时读取日志。
+
 require "json"
 
 module Sprites

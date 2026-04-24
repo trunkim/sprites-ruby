@@ -1,5 +1,10 @@
 # frozen_string_literal: true
 
+# 执行会话管理
+#
+# 提供列出活跃 session 和 attach 到已有 session 的功能。
+# TTY 模式的命令会创建可 attach 的 session。
+
 require "json"
 
 module Sprites

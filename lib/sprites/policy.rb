@@ -1,5 +1,9 @@
 # frozen_string_literal: true
 
+# 网络策略管理
+#
+# 控制 sprite 的出站网络访问规则（允许/拒绝特定域名）。
+
 require "json"
 
 module Sprites

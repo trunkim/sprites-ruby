@@ -1,5 +1,16 @@
 # frozen_string_literal: true
 
+# REST 文件系统操作
+#
+# 通过 HTTP REST 端点操作 sprite 内的文件系统。
+# 支持读写文件、列目录、删除、重命名、复制、权限修改等。
+#
+# @example
+#   fs = sprite.filesystem
+#   data = fs.read_file("/etc/hostname")
+#   fs.write_file("/tmp/hello.txt", "Hello!", mode: 0o644)
+#   entries = fs.read_dir("/tmp")
+
 require "json"
 require "net/http"
 

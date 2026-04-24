@@ -1,5 +1,16 @@
 # frozen_string_literal: true
 
+# 控制连接文件系统操作
+#
+# 通过控制连接（WebSocket 多路复用）执行文件系统操作，
+# 比 REST 方式更快（省去 HTTP 握手开销）。
+# 需要 sprite 支持控制连接。
+#
+# @example
+#   result = sprite.fs_read_control("/etc/hostname")
+#   puts result.data
+#   sprite.fs_write_control("/tmp/hello.txt", "Hello!")
+
 require "json"
 require "uri"
 

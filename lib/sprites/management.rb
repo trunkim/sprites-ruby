@@ -1,5 +1,12 @@
 # frozen_string_literal: true
 
+# Sprite 管理操作（CRUD）
+#
+# 混入 Client，提供 sprite 的创建、查询、列表、删除、升级、更新等接口。
+# 所有方法通过 REST API（HTTP JSON）实现。
+#
+# @see Client
+
 require "json"
 require "net/http"
 

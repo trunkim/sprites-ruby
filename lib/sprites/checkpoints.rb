@@ -1,5 +1,11 @@
 # frozen_string_literal: true
 
+# 检查点（Checkpoint）管理
+#
+# 检查点是 sprite 的快照，可用于备份和恢复状态。
+# 创建和恢复操作返回流式响应（CheckpointStream / RestoreStream），
+# 可逐行读取进度消息。
+
 require "json"
 
 module Sprites

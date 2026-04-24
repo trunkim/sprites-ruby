@@ -1,5 +1,10 @@
 # frozen_string_literal: true
 
+# 流式响应读取器
+#
+# Checkpoint、Restore、Service 操作返回 NDJSON（每行一个 JSON）流。
+# 这些类提供逐条读取和批量处理的接口，支持 Enumerable。
+
 require "json"
 require "stringio"
 
