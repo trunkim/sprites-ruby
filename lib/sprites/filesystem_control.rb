@@ -1,0 +1,279 @@
+# frozen_string_literal: true
+
+require "json"
+require "uri"
+
+module Sprites
+  FsReadResult = Data.define(:path, :size, :data) do
+    def initialize(path: nil, size: 0, data: nil)
+      super
+    end
+  end
+
+  FsWriteResult = Data.define(:path, :size, :mode) do
+    def initialize(path: nil, size: 0, mode: nil)
+      super
+    end
+  end
+
+  FsListResult = Data.define(:path, :entries, :count) do
+    def initialize(path: nil, entries: [], count: 0)
+      super
+    end
+  end
+
+  FsDeleteResult = Data.define(:deleted, :count) do
+    def initialize(deleted: [], count: 0)
+      super
+    end
+  end
+
+  FsChmodResult = Data.define(:affected, :count) do
+    def initialize(affected: [], count: 0)
+      super
+    end
+  end
+
+  FsChownResult = Data.define(:affected, :count) do
+    def initialize(affected: [], count: 0)
+      super
+    end
+  end
+
+  FsCopyResult = Data.define(:copied, :count, :total_bytes) do
+    def initialize(copied: [], count: 0, total_bytes: 0)
+      super
+    end
+  end
+
+  FsRenameResult = Data.define(:source, :dest) do
+    def initialize(source: nil, dest: nil)
+      super
+    end
+  end
+
+  module FilesystemControl
+    def fs_read_control(file_path, working_dir: "/home/sprite", start_byte: nil, end_byte: nil)
+      args = { "path" => file_path }
+      args["workingDir"] = working_dir if working_dir
+      args["start"] = start_byte.to_s if start_byte && start_byte > 0
+      args["end"] = end_byte.to_s if end_byte && end_byte > 0
+
+      conn = checkout_control_conn
+      send_control_op(conn, "fs.read", args)
+
+      _, data = conn.ws.read_message
+      check_fs_error!("read", file_path, data)
+
+      result_data = JSON.parse(data)
+
+      msg_type, binary_data = conn.ws.read_message
+      raise Error, "expected binary data" unless msg_type == :binary
+
+      wait_control_complete(conn)
+      checkin_control_conn(conn)
+
+      FsReadResult.new(path: result_data["path"], size: result_data["size"], data: binary_data)
+    end
+
+    def fs_write_control(file_path, data, working_dir: "/home/sprite", mode: 0o644, mkdir_parents: true, as_root: false)
+      args = { "path" => file_path }
+      args["workingDir"] = working_dir if working_dir
+      args["mode"] = format("%04o", mode)
+      args["mkdirParents"] = "false" unless mkdir_parents
+      args["asRoot"] = "true" if as_root
+
+      conn = checkout_control_conn
+      send_control_op(conn, "fs.write", args)
+      conn.ws.write_binary(data.b)
+
+      _, resp_data = conn.ws.read_message
+      check_fs_error!("write", file_path, resp_data)
+
+      result = JSON.parse(resp_data)
+      wait_control_complete(conn)
+      checkin_control_conn(conn)
+
+      FsWriteResult.new(path: result["path"], size: result["size"], mode: result["mode"])
+    end
+
+    def fs_list_control(dir_path, working_dir: "/home/sprite", recursive: false)
+      args = {}
+      args["path"] = dir_path if dir_path && !dir_path.empty?
+      args["workingDir"] = working_dir if working_dir
+      args["recursive"] = "true" if recursive
+
+      conn = checkout_control_conn
+      send_control_op(conn, "fs.list", args)
+
+      _, resp_data = conn.ws.read_message
+      check_fs_error!("list", dir_path, resp_data)
+
+      result = JSON.parse(resp_data)
+      wait_control_complete(conn)
+      checkin_control_conn(conn)
+
+      entries = (result["entries"] || []).map { |e| FSEntry.new(e) }
+      FsListResult.new(path: result["path"], entries: entries, count: result["count"] || 0)
+    end
+
+    def fs_delete_control(file_path, working_dir: "/home/sprite", recursive: false)
+      args = { "path" => file_path }
+      args["workingDir"] = working_dir if working_dir
+      args["recursive"] = "true" if recursive
+
+      conn = checkout_control_conn
+      send_control_op(conn, "fs.delete", args)
+
+      _, resp_data = conn.ws.read_message
+      check_fs_error!("delete", file_path, resp_data)
+
+      result = JSON.parse(resp_data)
+      wait_control_complete(conn)
+      checkin_control_conn(conn)
+
+      FsDeleteResult.new(deleted: result["deleted"] || [], count: result["count"] || 0)
+    end
+
+    def fs_chmod_control(file_path, mode, working_dir: "/home/sprite", recursive: false)
+      args = { "path" => file_path, "mode" => format("%04o", mode) }
+      args["workingDir"] = working_dir if working_dir
+      args["recursive"] = "true" if recursive
+
+      conn = checkout_control_conn
+      send_control_op(conn, "fs.chmod", args)
+
+      _, resp_data = conn.ws.read_message
+      check_fs_error!("chmod", file_path, resp_data)
+
+      result = JSON.parse(resp_data)
+      wait_control_complete(conn)
+      checkin_control_conn(conn)
+
+      FsChmodResult.new(affected: result["affected"] || [], count: result["count"] || 0)
+    end
+
+    def fs_chown_control(file_path, working_dir: "/home/sprite", uid: nil, gid: nil, recursive: false)
+      raise Error, "at least one of uid or gid must be set" if uid.nil? && gid.nil?
+
+      args = { "path" => file_path }
+      args["workingDir"] = working_dir if working_dir
+      args["uid"] = uid.to_s if uid
+      args["gid"] = gid.to_s if gid
+      args["recursive"] = "true" if recursive
+
+      conn = checkout_control_conn
+      send_control_op(conn, "fs.chown", args)
+
+      _, resp_data = conn.ws.read_message
+      check_fs_error!("chown", file_path, resp_data)
+
+      result = JSON.parse(resp_data)
+      wait_control_complete(conn)
+      checkin_control_conn(conn)
+
+      FsChownResult.new(affected: result["affected"] || [], count: result["count"] || 0)
+    end
+
+    def fs_copy_control(source, dest, working_dir: "/home/sprite", recursive: false, preserve_attrs: false, as_root: false)
+      args = { "source" => source, "dest" => dest }
+      args["workingDir"] = working_dir if working_dir
+      args["recursive"] = "true" if recursive
+      args["preserveAttrs"] = "true" if preserve_attrs
+      args["asRoot"] = "true" if as_root
+
+      conn = checkout_control_conn
+      send_control_op(conn, "fs.copy", args)
+
+      _, resp_data = conn.ws.read_message
+      check_fs_error!("copy", source, resp_data)
+
+      result = JSON.parse(resp_data)
+      wait_control_complete(conn)
+      checkin_control_conn(conn)
+
+      FsCopyResult.new(
+        copied: result["copied"] || [],
+        count: result["count"] || 0,
+        total_bytes: result["totalBytes"] || 0
+      )
+    end
+
+    def fs_rename_control(source, dest, working_dir: "/home/sprite")
+      args = { "source" => source, "dest" => dest }
+      args["workingDir"] = working_dir if working_dir
+
+      conn = checkout_control_conn
+      send_control_op(conn, "fs.rename", args)
+
+      _, resp_data = conn.ws.read_message
+      check_fs_error!("rename", source, resp_data)
+
+      result = JSON.parse(resp_data)
+      wait_control_complete(conn)
+      checkin_control_conn(conn)
+
+      FsRenameResult.new(source: result["source"], dest: result["dest"])
+    end
+
+    def fs_stat_control(file_path, working_dir: "/home/sprite")
+      result = fs_list_control(file_path, working_dir: working_dir)
+      raise FSNotFoundError.new("stat", file_path) if result.entries.empty?
+
+      result.entries.first
+    end
+
+    private
+
+    def checkout_control_conn
+      raise Error, "sprite does not support control connections" unless supports_control?
+
+      pool = client.get_or_create_pool(name)
+      pool.checkout
+    end
+
+    def checkin_control_conn(conn)
+      return unless conn
+
+      conn.send_release
+      pool = client.get_or_create_pool(name)
+      pool.checkin(conn)
+    end
+
+    def send_control_op(conn, op, args)
+      encoded = URI.encode_www_form(args)
+      msg = { type: "op.start", op: op, args: encoded }
+      conn.ws.write_text(JSON.generate(msg))
+    end
+
+    def wait_control_complete(conn)
+      loop do
+        _, data = conn.ws.read_message
+        raise Error, "failed to read control message" unless data
+
+        msg = JSON.parse(data) rescue next
+        case msg["type"]
+        when "op.complete"
+          return
+        when "op.error"
+          err_args = msg["args"].is_a?(String) ? (JSON.parse(msg["args"]) rescue {}) : (msg["args"] || {})
+          raise Error, "operation failed: #{err_args['error'] || 'unknown'}"
+        end
+      end
+    end
+
+    def check_fs_error!(op, path, data)
+      parsed = JSON.parse(data) rescue nil
+      return unless parsed
+
+      if parsed["error"]
+        code = parsed["code"]
+        raise FSError.new(op, path, "#{parsed['error']} (#{code})")
+      end
+    end
+  end
+
+  class Sprite
+    include FilesystemControl
+  end
+end

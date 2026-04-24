@@ -1,0 +1,420 @@
+# frozen_string_literal: true
+
+require "stringio"
+require "uri"
+
+module Sprites
+  # 远程命令执行器
+  #
+  # 对标 Go 标准库的 exec.Cmd 接口，提供在远程 Sprite 上执行命令的能力。
+  # 支持 stdin/stdout/stderr 重定向、pipe、TTY 模式、信号发送等。
+  #
+  # @example 基本用法
+  #   cmd = sprite.command("ls", "-la")
+  #   err = cmd.run
+  #
+  # @example 获取输出
+  #   output, err = sprite.command("echo", "hello").output
+  #
+  # @example 使用 pipe
+  #   cmd = sprite.command("cat")
+  #   stdin = cmd.stdin_pipe
+  #   stdout = cmd.stdout_pipe
+  #   cmd.start
+  #   stdin.write("hello\n")
+  #   stdin.close
+  #   puts stdout.read
+  #   cmd.wait
+  #
+  # @example TTY 模式
+  #   cmd = sprite.command("bash")
+  #   cmd.set_tty(true)
+  #   cmd.set_tty_size(24, 80)
+  #   cmd.run
+  class Cmd
+    # @return [String] 要执行的命令路径
+    attr_accessor :path
+    # @return [Array<String>] 命令参数（包含 path 作为 args[0]）
+    attr_accessor :args
+    # @return [Array<String>, nil] 环境变量，格式 ["KEY=value", ...]
+    attr_accessor :env
+    # @return [String, nil] 工作目录
+    attr_accessor :dir
+    # @return [IO, nil] 标准输入源
+    attr_accessor :stdin
+    # @return [IO, nil] 标准输出目标
+    attr_accessor :stdout
+    # @return [IO, nil] 标准错误目标
+    attr_accessor :stderr
+    # @return [Proc, nil] 文本消息回调（用于端口通知等带外消息）
+    attr_accessor :text_message_handler
+
+    def initialize(sprite:, name:, args: [], ctx: nil)
+      @sprite = sprite
+      @path = name
+      @args = [name] + args
+      @ctx = ctx
+      @env = nil
+      @dir = nil
+      @stdin = nil
+      @stdout = nil
+      @stderr = nil
+      @text_message_handler = nil
+
+      @mutex = Mutex.new
+      @started = false
+      @finished = false
+      @wait_err = nil
+      @exit_code = 0
+
+      @stdin_pipe = nil
+      @stdout_pipe = nil
+      @stderr_pipe = nil
+      @closers = []  # start 后需要关闭的 IO 对象
+
+      @tty = false
+      @tty_size = nil
+      @session_id = nil     # attach 时使用
+      @control_mode = false
+      @control_conn = nil
+      @ws_cmd = nil
+    end
+
+    def to_s
+      "#{@path} #{@args[1..].join(' ')}"
+    end
+
+    # @return [String] "control"、"direct" 或 ""（未启动时）
+    def connection_mode
+      @mutex.synchronize do
+        return "" unless @started
+
+        @control_mode ? "control" : "direct"
+      end
+    end
+
+    # 启动命令并等待完成
+    # @return [nil, ExitError, Error] nil 表示成功
+    def run
+      start
+      wait
+    end
+
+    # 异步启动命令（不等待完成）
+    # @raise [AlreadyStartedError] 重复启动
+    def start
+      @mutex.synchronize do
+        raise AlreadyStartedError if @started
+
+        @started = true
+      end
+
+      # attach 操作需要知道服务端版本以选择正确的端点格式
+      if @session_id && @sprite.client.sprite_version.empty?
+        @sprite.client.fetch_version(@sprite.name)
+      end
+
+      # 延迟检测控制连接支持
+      @sprite.ensure_control_support
+
+      # 尝试使用控制连接（更快，可复用）
+      control_conn = nil
+      using_control = false
+
+      if @sprite.supports_control?
+        pool = @sprite.client.get_or_create_pool(@sprite.name)
+        begin
+          control_conn = pool.checkout
+          if control_conn
+            using_control = true
+            @control_mode = true
+            Sprites.dbg("sprites: using control conn for exec", sprite: @sprite.name)
+          end
+        rescue => e
+          Sprites.dbg("sprites: control checkout failed", error: e.message)
+        end
+      end
+
+      # 构建 WebSocket URL 并创建底层命令执行器
+      ws_url = build_websocket_url
+      headers = { "Authorization" => "Bearer #{@sprite.client.token}" }
+
+      cmd_args = @args.length > 1 ? @args[1..] : []
+      @ws_cmd = WsCmd.new(url: ws_url, headers: headers, name: @path, args: cmd_args)
+
+      if using_control
+        @ws_cmd.existing_conn = control_conn.ws
+        @ws_cmd.using_control = true
+        @ws_cmd.control_conn = control_conn
+      end
+
+      @ws_cmd.stdin = @stdin
+      @ws_cmd.stdout = @stdout
+      @ws_cmd.stderr = @stderr
+      @ws_cmd.tty = @tty
+      @ws_cmd.is_attach = !@session_id.nil?
+      @ws_cmd.attach_session_id = @session_id
+      @ws_cmd.env = @env
+      @ws_cmd.dir = @dir
+      @ws_cmd.text_message_handler = @text_message_handler
+
+      begin
+        @ws_cmd.start
+      rescue => e
+        # path-based attach 返回 404 时，回退到 legacy query parameter 格式
+        if @session_id && !@sprite.use_legacy_exec_endpoint? &&
+           e.message.include?("HTTP 404")
+          @sprite.use_legacy_exec_endpoint = true
+          @tty = true
+
+          ws_url = build_websocket_url
+          @ws_cmd = WsCmd.new(url: ws_url, headers: headers, name: @path, args: cmd_args)
+          @ws_cmd.stdin = @stdin
+          @ws_cmd.stdout = @stdout
+          @ws_cmd.stderr = @stderr
+          @ws_cmd.tty = @tty
+          @ws_cmd.is_attach = true
+          @ws_cmd.text_message_handler = @text_message_handler
+          @ws_cmd.start
+          return
+        end
+
+        if control_conn
+          pool = @sprite.client.get_or_create_pool(@sprite.name)
+          pool.checkin(control_conn)
+        end
+        raise Error, "failed to start sprite command: #{e.message}"
+      end
+
+      @control_conn = control_conn if using_control
+    end
+
+    # 等待命令完成，返回错误（nil 表示成功）
+    # @return [nil, ExitError, Error]
+    # @raise [NotStartedError] 未调用 start
+    def wait
+      @mutex.synchronize do
+        raise NotStartedError unless @started
+        return @wait_err if @finished
+      end
+
+      raise Error, "command not fully initialized" unless @ws_cmd
+
+      @ws_cmd.wait
+      @exit_code = @ws_cmd.exit_code
+
+      @stdin_pipe&.close
+
+      # 归还控制连接
+      if @control_conn
+        @control_conn.send_release
+        pool = @sprite.client.get_or_create_pool(@sprite.name)
+        pool.checkin(@control_conn)
+        Sprites.dbg("sprites: returned control conn after exec", sprite: @sprite.name)
+        @control_conn = nil
+      end
+
+      @closers.each { |c| c.close rescue nil }
+
+      @mutex.synchronize do
+        @finished = true
+
+        if @exit_code == -1
+          @wait_err = Error.new("connection closed")
+        elsif @exit_code != 0
+          @wait_err = ExitError.new(@exit_code)
+        end
+
+        @wait_err
+      end
+    end
+
+    # 执行命令并返回 stdout 内容
+    # @return [Array(String, nil)] [输出内容, 错误]
+    def output
+      raise Error, "sprite: Stdout already set" if @stdout
+
+      buf = StringIO.new
+      @stdout = buf
+
+      err = run
+      [buf.string, err]
+    end
+
+    # 执行命令并返回 stdout + stderr 合并内容
+    # @return [Array(String, nil)] [合并内容, 错误]
+    def combined_output
+      raise Error, "sprite: Stdout already set" if @stdout
+      raise Error, "sprite: Stderr already set" if @stderr
+
+      buf = StringIO.new
+      @stdout = buf
+      @stderr = buf
+
+      err = run
+      [buf.string, err]
+    end
+
+    # 创建连接到 stdin 的 pipe，返回写入端
+    # @return [IO] pipe 写入端
+    def stdin_pipe
+      raise Error, "sprite: Stdin already set" if @stdin
+      raise Error, "sprite: StdinPipe after process started" if @started
+
+      rd, wr = IO.pipe
+      @stdin = rd
+      @closers << rd
+      wr
+    end
+
+    # 创建连接到 stdout 的 pipe，返回读取端
+    # @return [IO] pipe 读取端
+    def stdout_pipe
+      raise Error, "sprite: Stdout already set" if @stdout
+      raise Error, "sprite: StdoutPipe after process started" if @started
+
+      rd, wr = IO.pipe
+      @stdout = wr
+      @closers << wr
+      rd
+    end
+
+    # 创建连接到 stderr 的 pipe，返回读取端
+    # @return [IO] pipe 读取端
+    def stderr_pipe
+      raise Error, "sprite: Stderr already set" if @stderr
+      raise Error, "sprite: StderrPipe after process started" if @started
+
+      rd, wr = IO.pipe
+      @stderr = wr
+      @closers << wr
+      rd
+    end
+
+    # 启用/禁用 TTY 模式（必须在 start 前调用）
+    def set_tty(enable)
+      @mutex.synchronize do
+        raise "sprite: SetTTY after process started" if @started
+
+        @tty = enable
+      end
+    end
+
+    # 设置终端尺寸（start 前设初始大小，start 后调整运行中的终端）
+    def set_tty_size(rows, cols)
+      @mutex.synchronize do
+        raise Error, "sprite: SetTTYSize called but TTY mode not enabled" unless @tty
+
+        if @started && !@finished
+          raise Error, "command not fully initialized" unless @ws_cmd
+
+          return @ws_cmd.resize(cols, rows)
+        end
+
+        @tty_size = { rows: rows, cols: cols }
+      end
+    end
+
+    # 调整运行中的 TTY 终端尺寸
+    def resize(rows, cols)
+      @mutex.synchronize do
+        raise Error, "sprite: Resize before process started" unless @started
+        raise Error, "sprite: Resize called but TTY mode not enabled" unless @tty
+        raise Error, "sprite: Resize after process finished" if @finished
+        raise Error, "command not fully initialized" unless @ws_cmd
+
+        @ws_cmd.resize(cols, rows)
+      end
+    end
+
+    # 发送信号给远程进程
+    # 优先通过 WebSocket 发送，不支持时回退到 HTTP POST
+    # @param sig [String] 信号名（INT, TERM, HUP, KILL, QUIT, USR1, USR2）
+    def signal(sig)
+      @mutex.synchronize do
+        raise Error, "sprite: Signal before process started" unless @started
+        raise Error, "sprite: Signal after process finished" if @finished
+
+        if @ws_cmd.has_capability?("signal")
+          return @ws_cmd.signal(sig)
+        end
+
+        # HTTP 回退
+        sess_id = @session_id || @ws_cmd.session_id
+        raise Error, "sprite: no session ID for HTTP signal fallback" unless sess_id
+
+        @sprite.client.signal_session(@sprite.name, sess_id, sig)
+      end
+    end
+
+    # @return [Integer] 退出码，未完成时返回 -1
+    def exit_code
+      @mutex.synchronize do
+        return -1 unless @finished
+
+        @exit_code
+      end
+    end
+
+    # 手动设置控制模式（需要 session_id）
+    def set_control_mode(enable)
+      @mutex.synchronize do
+        raise Error, "sprite: SetControlMode after process started" if @started
+        raise Error, "sprite: control mode requires session ID" if enable && !@session_id
+
+        @control_mode = enable
+      end
+    end
+
+    protected
+
+    attr_writer :session_id
+
+    private
+
+    # 构建 exec 端点的 WebSocket URL
+    def build_websocket_url
+      base = @sprite.client.base_url.sub(/\Ahttp/, "ws")
+
+      uri = URI.parse(base)
+      params = URI.decode_www_form(uri.query || "")
+
+      # attach 操作：根据版本选择 path 格式或 query 格式
+      if @session_id
+        if @sprite.use_legacy_exec_endpoint? || !@sprite.client.supports_path_attach?
+          uri.path = "/v1/sprites/#{@sprite.name}/exec"
+          params << ["id", @session_id]
+        else
+          uri.path = "/v1/sprites/#{@sprite.name}/exec/#{@session_id}"
+        end
+      else
+        uri.path = "/v1/sprites/#{@sprite.name}/exec"
+      end
+
+      # 新建命令时添加 cmd 和 path 参数
+      unless @session_id
+        @args.each_with_index do |arg, i|
+          params << ["cmd", arg]
+          params << ["path", arg] if i == 0
+        end
+      end
+
+      @env&.each { |e| params << ["env", e] }
+      params << ["dir", @dir] if @dir && !@dir.empty?
+
+      if @tty
+        params << ["tty", "true"]
+        if @tty_size
+          params << ["rows", @tty_size[:rows].to_s]
+          params << ["cols", @tty_size[:cols].to_s]
+        end
+      end
+
+      params << ["cc", "true"] if @control_mode
+      params << ["stdin", @stdin ? "true" : "false"]
+
+      uri.query = URI.encode_www_form(params)
+      uri.to_s
+    end
+  end
+end
