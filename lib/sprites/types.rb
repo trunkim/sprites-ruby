@@ -220,8 +220,8 @@ module Sprites
   end
 
   # 服务定义
-  Service = Data.define(:name, :cmd, :args, :needs, :http_port) do
-    def initialize(name: nil, cmd: nil, args: nil, needs: nil, http_port: nil)
+  Service = Data.define(:name, :cmd, :args, :env, :dir, :needs, :http_port) do
+    def initialize(name: nil, cmd: nil, args: nil, env: nil, dir: nil, needs: nil, http_port: nil)
       super
     end
 
@@ -232,6 +232,8 @@ module Sprites
         name: hash["name"],
         cmd: hash["cmd"],
         args: hash["args"],
+        env: hash["env"],
+        dir: hash["dir"],
         needs: hash["needs"],
         http_port: hash["http_port"]
       )
@@ -262,8 +264,8 @@ module Sprites
   end
 
   # 服务定义 + 运行时状态的组合
-  ServiceWithState = Data.define(:name, :cmd, :args, :needs, :http_port, :state) do
-    def initialize(name: nil, cmd: nil, args: nil, needs: nil, http_port: nil, state: nil)
+  ServiceWithState = Data.define(:name, :cmd, :args, :env, :dir, :needs, :http_port, :state) do
+    def initialize(name: nil, cmd: nil, args: nil, env: nil, dir: nil, needs: nil, http_port: nil, state: nil)
       super
     end
 
@@ -274,6 +276,8 @@ module Sprites
         name: hash["name"],
         cmd: hash["cmd"],
         args: hash["args"],
+        env: hash["env"],
+        dir: hash["dir"],
         needs: hash["needs"],
         http_port: hash["http_port"],
         state: ServiceState.from_hash(hash["state"])
@@ -341,14 +345,16 @@ module Sprites
   end
 
   # 创建/更新服务时的请求体
-  ServiceRequest = Data.define(:cmd, :args, :needs, :http_port) do
-    def initialize(cmd:, args: nil, needs: nil, http_port: nil)
+  ServiceRequest = Data.define(:cmd, :args, :env, :dir, :needs, :http_port) do
+    def initialize(cmd:, args: nil, env: nil, dir: nil, needs: nil, http_port: nil)
       super
     end
 
     def to_h
       h = { cmd: cmd }
       h[:args] = args if args
+      h[:env] = env if env
+      h[:dir] = dir if dir
       h[:needs] = needs if needs
       h[:http_port] = http_port if http_port
       h

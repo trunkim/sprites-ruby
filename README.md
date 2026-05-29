@@ -208,7 +208,13 @@ stream.each { |msg| puts "#{msg.type}: #{msg.data}" }
 
 ```ruby
 # Create a service
-req = Sprites::ServiceRequest.new(cmd: "nginx", args: ["-g", "daemon off;"])
+req = Sprites::ServiceRequest.new(
+  cmd: "nginx",
+  args: ["-g", "daemon off;"],
+  env: { "RAILS_ENV" => "development" },
+  dir: "/workspace/app",
+  http_port: 3000
+)
 stream = sprite.create_service("web", req)
 stream.each { |event| puts "#{event.type}: #{event.data}" }
 

@@ -15,6 +15,8 @@ sprite = client.sprite(sprite_name)
 stream = sprite.create_service(service_name, Sprites::ServiceRequest.new(
   cmd: "python",
   args: ["-m", "http.server", "8000"],
+  env: ENV.fetch("SERVICE_ENV_JSON", "{}").then { |value| JSON.parse(value) },
+  dir: ENV["SERVICE_DIR"],
   http_port: 8000
 ))
 

@@ -108,3 +108,45 @@ RSpec.describe Sprites::SpriteInfo do
     end
   end
 end
+
+RSpec.describe Sprites::ServiceRequest do
+  describe "#to_h" do
+    it "serializes service environment, directory, and http port" do
+      request = described_class.new(
+        cmd: "bin/rails",
+        args: %w[server -b 0.0.0.0],
+        env: { "RAILS_ENV" => "development" },
+        dir: "/workspace/app",
+        http_port: 3000
+      )
+
+      expect(request.to_h).to eq({
+        cmd: "bin/rails",
+        args: %w[server -b 0.0.0.0],
+        env: { "RAILS_ENV" => "development" },
+        dir: "/workspace/app",
+        http_port: 3000
+      })
+    end
+  end
+end
+
+RSpec.describe Sprites::ServiceWithState do
+  describe ".from_hash" do
+    it "parses service environment and directory" do
+      service = described_class.from_hash({
+        "name" => "web",
+        "cmd" => "bin/rails",
+        "args" => %w[server],
+        "env" => { "RAILS_ENV" => "development" },
+        "dir" => "/workspace/app",
+        "http_port" => 3000,
+        "state" => { "status" => "running" }
+      })
+
+      expect(service.env).to eq({ "RAILS_ENV" => "development" })
+      expect(service.dir).to eq("/workspace/app")
+      expect(service.state.status).to eq("running")
+    end
+  end
+end
