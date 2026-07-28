@@ -16,7 +16,7 @@ module Sprites
   # - Stream 模式：二进制帧带流 ID 前缀（stdin=0, stdout=1, stderr=2, exit=3）
   class WsCmd
     attr_accessor :path, :args, :stdin, :stdout, :stderr, :env, :dir,
-                  :tty, :is_attach, :attach_session_id,
+                  :tty, :is_attach, :attach_session_id, :max_run_after_disconnect,
                   :text_message_handler, :existing_conn, :using_control, :control_conn
     attr_reader :session_id, :capabilities
 
@@ -29,6 +29,7 @@ module Sprites
       @tty = false
       @is_attach = false
       @attach_session_id = nil
+      @max_run_after_disconnect = nil
       @text_message_handler = nil
       @existing_conn = nil      # 复用已有的 WebSocket（控制连接）
       @using_control = false     # 是否使用控制连接协议
@@ -157,6 +158,9 @@ module Sprites
       args["tty"] = "true" if @tty
       args["stdin"] = "true" if @stdin
       args["id"] = @attach_session_id if @attach_session_id
+      unless @max_run_after_disconnect.nil?
+        args["max_run_after_disconnect"] = @max_run_after_disconnect.to_s
+      end
 
       envelope = {
         type: "op.start",

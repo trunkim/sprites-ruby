@@ -48,6 +48,8 @@ module Sprites
     attr_accessor :stderr
     # @return [Proc, nil] 文本消息回调（用于端口通知等带外消息）
     attr_accessor :text_message_handler
+    # @return [Integer, nil] 断连后允许继续运行的秒数（官方 max_run_after_disconnect）
+    attr_accessor :max_run_after_disconnect
 
     def initialize(sprite:, name:, args: [], ctx: nil)
       @sprite = sprite
@@ -60,6 +62,7 @@ module Sprites
       @stdout = nil
       @stderr = nil
       @text_message_handler = nil
+      @max_run_after_disconnect = nil
 
       @mutex = Mutex.new
       @started = false
@@ -148,15 +151,7 @@ module Sprites
         @ws_cmd.control_conn = control_conn
       end
 
-      @ws_cmd.stdin = @stdin
-      @ws_cmd.stdout = @stdout
-      @ws_cmd.stderr = @stderr
-      @ws_cmd.tty = @tty
-      @ws_cmd.is_attach = !@session_id.nil?
-      @ws_cmd.attach_session_id = @session_id
-      @ws_cmd.env = @env
-      @ws_cmd.dir = @dir
-      @ws_cmd.text_message_handler = @text_message_handler
+      configure_ws_cmd!(@ws_cmd)
 
       begin
         @ws_cmd.start
@@ -169,12 +164,8 @@ module Sprites
 
           ws_url = build_websocket_url
           @ws_cmd = WsCmd.new(url: ws_url, headers: headers, name: @path, args: cmd_args)
-          @ws_cmd.stdin = @stdin
-          @ws_cmd.stdout = @stdout
-          @ws_cmd.stderr = @stderr
-          @ws_cmd.tty = @tty
+          configure_ws_cmd!(@ws_cmd)
           @ws_cmd.is_attach = true
-          @ws_cmd.text_message_handler = @text_message_handler
           @ws_cmd.start
           return
         end
@@ -300,6 +291,20 @@ module Sprites
       end
     end
 
+    # 设置断连后最大继续运行秒数（必须在 start 前调用）
+    # @param seconds [Integer] 秒；非 TTY 官方默认 10，TTY 默认无限（0）
+    def set_max_run_after_disconnect(seconds)
+      @mutex.synchronize do
+        raise Error, "sprite: SetMaxRunAfterDisconnect after process started" if @started
+
+        value = Integer(seconds)
+        raise ArgumentError, "max_run_after_disconnect must be >= 0" if value.negative?
+
+        @max_run_after_disconnect = value
+      end
+      self
+    end
+
     # 设置终端尺寸（start 前设初始大小，start 后调整运行中的终端）
     def set_tty_size(rows, cols)
       @mutex.synchronize do
@@ -412,9 +417,25 @@ module Sprites
 
       params << ["cc", "true"] if @control_mode
       params << ["stdin", @stdin ? "true" : "false"]
+      if !@session_id && !@max_run_after_disconnect.nil?
+        params << ["max_run_after_disconnect", @max_run_after_disconnect.to_s]
+      end
 
       uri.query = URI.encode_www_form(params)
       uri.to_s
+    end
+
+    def configure_ws_cmd!(ws_cmd)
+      ws_cmd.stdin = @stdin
+      ws_cmd.stdout = @stdout
+      ws_cmd.stderr = @stderr
+      ws_cmd.tty = @tty
+      ws_cmd.is_attach = !@session_id.nil?
+      ws_cmd.attach_session_id = @session_id
+      ws_cmd.env = @env
+      ws_cmd.dir = @dir
+      ws_cmd.text_message_handler = @text_message_handler
+      ws_cmd.max_run_after_disconnect = @max_run_after_disconnect
     end
   end
 end
