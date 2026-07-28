@@ -8,7 +8,7 @@ Gem::Specification.new do |spec|
   spec.authors = ["Sprites Team"]
   spec.summary = "Ruby SDK for the Sprites API"
   spec.description = "An idiomatic Ruby SDK for working with sprites. Execute commands on remote Sprites as if they were local."
-  spec.homepage = "https://github.com/superfly/sprites-ruby"
+  spec.homepage = "https://github.com/trunkim/sprites-ruby"
   spec.license = "MIT"
   spec.required_ruby_version = ">= 3.1"
 

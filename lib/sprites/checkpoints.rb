@@ -41,6 +41,13 @@ module Sprites
       resp = http_post_stream("/v1/sprites/#{sprite_name}/checkpoints/#{checkpoint_id}/restore", nil)
       RestoreStream.new(resp.body)
     end
+
+    def delete_checkpoint(sprite_name, checkpoint_id)
+      resp = http_delete("/v1/sprites/#{sprite_name}/checkpoints/#{checkpoint_id}")
+      return if [200, 204].include?(resp.code.to_i)
+
+      parse_response!(resp)
+    end
   end
 
   class Sprite
@@ -58,6 +65,10 @@ module Sprites
 
     def restore_checkpoint(checkpoint_id)
       client.restore_checkpoint(name, checkpoint_id)
+    end
+
+    def delete_checkpoint(checkpoint_id)
+      client.delete_checkpoint(name, checkpoint_id)
     end
   end
 end
