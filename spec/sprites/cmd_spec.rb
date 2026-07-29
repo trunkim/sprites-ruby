@@ -61,4 +61,18 @@ RSpec.describe Sprites::Cmd do
       end
     end
   end
+
+  describe "#signal" do
+    it "ws_cmd 为 nil 时回退 HTTP，不抛 NoMethodError" do
+      cmd = described_class.new(sprite: sprite, name: "sleep", args: ["60"])
+      cmd.instance_variable_set(:@started, true)
+      cmd.instance_variable_set(:@finished, false)
+      cmd.instance_variable_set(:@ws_cmd, nil)
+      cmd.send(:session_id=, "42")
+      allow(client).to receive(:signal_session)
+
+      expect { cmd.signal("KILL") }.not_to raise_error
+      expect(client).to have_received(:signal_session).with("demo", "42", "KILL")
+    end
+  end
 end

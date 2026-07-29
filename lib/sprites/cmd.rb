@@ -345,12 +345,13 @@ module Sprites
         raise Error, "sprite: Signal before process started" unless @started
         raise Error, "sprite: Signal after process finished" if @finished
 
-        if @ws_cmd.has_capability?("signal")
+        # @ws_cmd 可能已断开为 nil；不得对 nil 调 has_capability?（Gateway 曾因此 NoMethodError）。
+        if @ws_cmd&.has_capability?("signal")
           return @ws_cmd.signal(sig)
         end
 
         # HTTP 回退
-        sess_id = @session_id || @ws_cmd.session_id
+        sess_id = @session_id || @ws_cmd&.session_id
         raise Error, "sprite: no session ID for HTTP signal fallback" unless sess_id
 
         @sprite.client.signal_session(@sprite.name, sess_id, sig)
