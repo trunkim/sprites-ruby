@@ -229,36 +229,77 @@ module Sprites
     end
   end
 
-  # privileges / resources policy 的通用容器（与 network 并列的官方 policy 面）
-  PrivilegesPolicy = Data.define(:raw) do
-    def initialize(raw: {})
-      super
+  # Privileges policy（capability / device 限制）。
+  # 官方 JSON：profile、devices[]、noNewPrivileges（camelCase）。
+  PrivilegesPolicy = Data.define(:profile, :devices, :no_new_privileges) do
+    PROFILES = [ "", "minimal", "standard", "privileged" ].freeze
+
+    def initialize(profile: nil, devices: nil, no_new_privileges: nil)
+      unless profile.nil? || PROFILES.include?(profile.to_s)
+        raise ArgumentError, "privileges profile must be one of #{PROFILES.inspect}"
+      end
+
+      super(
+        profile: profile&.to_s,
+        devices: devices.nil? ? nil : Array(devices).map(&:to_s),
+        no_new_privileges: no_new_privileges.nil? ? nil : !!no_new_privileges
+      )
     end
 
     def to_h
-      raw.is_a?(Hash) ? raw : {}
+      h = {}
+      h[:profile] = profile unless profile.nil?
+      h[:devices] = devices unless devices.nil?
+      h[:noNewPrivileges] = no_new_privileges unless no_new_privileges.nil?
+      h
     end
 
     def self.from_hash(hash)
       return nil unless hash
 
-      new(raw: hash)
+      new(
+        profile: hash["profile"] || hash[:profile],
+        devices: hash.key?("devices") || hash.key?(:devices) ? (hash["devices"] || hash[:devices]) : nil,
+        no_new_privileges: if hash.key?("noNewPrivileges")
+                             hash["noNewPrivileges"]
+                           elsif hash.key?(:no_new_privileges)
+                             hash[:no_new_privileges]
+                           end
+      )
     end
   end
 
-  ResourcesPolicy = Data.define(:raw) do
-    def initialize(raw: {})
-      super
+  # Resources policy（memory limits）。
+  # 官方 JSON：{ "memory": { "limit_mb": N, "autoscale": bool } }
+  ResourcesPolicy = Data.define(:limit_mb, :autoscale) do
+    def initialize(limit_mb: nil, autoscale: nil)
+      super(
+        limit_mb: limit_mb.nil? ? nil : Integer(limit_mb),
+        autoscale: autoscale.nil? ? nil : !!autoscale
+      )
     end
 
     def to_h
-      raw.is_a?(Hash) ? raw : {}
+      return {} if limit_mb.nil? && autoscale.nil?
+
+      memory = {}
+      memory[:limit_mb] = limit_mb unless limit_mb.nil?
+      memory[:autoscale] = autoscale unless autoscale.nil?
+      { memory: memory }
     end
 
     def self.from_hash(hash)
       return nil unless hash
 
-      new(raw: hash)
+      memory = hash["memory"] || hash[:memory] || {}
+      new(
+        limit_mb: memory["limit_mb"] || memory[:limit_mb],
+        autoscale: if memory.key?("autoscale")
+                     memory["autoscale"]
+                   elsif memory.key?(:autoscale)
+                     memory[:autoscale]
+                   end
+      )
     end
   end
 

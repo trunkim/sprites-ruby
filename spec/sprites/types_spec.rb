@@ -116,6 +116,45 @@ RSpec.describe Sprites::NetworkPolicy do
   end
 end
 
+RSpec.describe Sprites::PrivilegesPolicy do
+  it "round-trips official wire fields" do
+    policy = described_class.from_hash(
+      "profile" => "standard",
+      "devices" => [],
+      "noNewPrivileges" => true
+    )
+    expect(policy.profile).to eq("standard")
+    expect(policy.devices).to eq([])
+    expect(policy.no_new_privileges).to be true
+    expect(policy.to_h).to eq(
+      profile: "standard",
+      devices: [],
+      noNewPrivileges: true
+    )
+  end
+
+  it "rejects unknown profile" do
+    expect { described_class.new(profile: "root") }.to raise_error(ArgumentError, /profile/)
+  end
+end
+
+RSpec.describe Sprites::ResourcesPolicy do
+  it "round-trips memory limit_mb / autoscale" do
+    policy = described_class.from_hash(
+      "memory" => { "limit_mb" => 512, "autoscale" => false }
+    )
+    expect(policy.limit_mb).to eq(512)
+    expect(policy.autoscale).to be false
+    expect(policy.to_h).to eq(memory: { limit_mb: 512, autoscale: false })
+  end
+
+  it "parses empty policy after delete" do
+    policy = described_class.from_hash({})
+    expect(policy.limit_mb).to be_nil
+    expect(policy.to_h).to eq({})
+  end
+end
+
 RSpec.describe Sprites::SpriteInfo do
   describe ".from_hash" do
     it "creates from full hash" do
