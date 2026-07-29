@@ -159,8 +159,12 @@ module Sprites
         # path-based attach 返回 404 时，回退到 legacy query parameter 格式
         if @session_id && !@sprite.use_legacy_exec_endpoint? &&
            e.message.include?("HTTP 404")
+          release_control_conn!(control_conn)
+          control_conn = nil
+          using_control = false
+
           @sprite.use_legacy_exec_endpoint = true
-          @tty = true
+          # attach 回退路径仍要求调用方已显式 set_tty；不在此隐式打开 TTY
 
           ws_url = build_websocket_url
           @ws_cmd = WsCmd.new(url: ws_url, headers: headers, name: @path, args: cmd_args)
@@ -170,10 +174,7 @@ module Sprites
           return
         end
 
-        if control_conn
-          pool = @sprite.client.get_or_create_pool(@sprite.name)
-          pool.checkin(control_conn)
-        end
+        release_control_conn!(control_conn)
         raise Error, "failed to start sprite command: #{e.message}"
       end
 
@@ -191,21 +192,15 @@ module Sprites
 
       raise Error, "command not fully initialized" unless @ws_cmd
 
-      @ws_cmd.wait
-      @exit_code = @ws_cmd.exit_code
-
-      @stdin_pipe&.close
-
-      # 归还控制连接
-      if @control_conn
-        @control_conn.send_release
-        pool = @sprite.client.get_or_create_pool(@sprite.name)
-        pool.checkin(@control_conn)
-        Sprites.dbg("sprites: returned control conn after exec", sprite: @sprite.name)
+      begin
+        @ws_cmd.wait
+        @exit_code = @ws_cmd.exit_code
+      ensure
+        @stdin_pipe&.close rescue nil
+        release_control_conn!(@control_conn)
         @control_conn = nil
+        @closers.each { |c| c.close rescue nil }
       end
-
-      @closers.each { |c| c.close rescue nil }
 
       @mutex.synchronize do
         @finished = true
@@ -218,6 +213,16 @@ module Sprites
 
         @wait_err
       end
+    end
+
+    # 幂等关闭：等待已启动命令结束，或仅释放尚未 wait 的资源。
+    def close
+      return unless @started
+
+      wait unless @finished
+    rescue Error
+      release_control_conn!(@control_conn)
+      @control_conn = nil
     end
 
     # 执行命令并返回 stdout 内容
@@ -436,6 +441,17 @@ module Sprites
       ws_cmd.dir = @dir
       ws_cmd.text_message_handler = @text_message_handler
       ws_cmd.max_run_after_disconnect = @max_run_after_disconnect
+    end
+
+    def release_control_conn!(conn)
+      return unless conn
+
+      conn.send_release rescue nil
+      pool = @sprite.client.get_or_create_pool(@sprite.name)
+      pool.checkin(conn)
+      Sprites.dbg("sprites: returned control conn after exec", sprite: @sprite.name)
+    rescue => e
+      Sprites.dbg("sprites: control checkin failed", error: e.message)
     end
   end
 end

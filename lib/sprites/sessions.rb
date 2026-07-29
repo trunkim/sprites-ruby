@@ -2,8 +2,8 @@
 
 # 执行会话管理
 #
-# 提供列出活跃 session 和 attach 到已有 session 的功能。
-# TTY 模式的命令会创建可 attach 的 session。
+# 提供列出活跃 session、attach、以及 HTTP kill 的能力。
+# TTY 必须由调用方显式 opt in；Rails 普通 Tool 应固定 tty=false。
 
 require "json"
 
@@ -17,11 +17,22 @@ module Sprites
       sessions_raw.map { |s| Session.from_hash(s) }
     end
 
-    def attach_session(sprite_name, session_id, org: nil)
+    # 构造可 attach 的 Cmd。不会自动 start；TTY 默认 false，调用方按需 set_tty(true)。
+    def attach_session(sprite_name, session_id, org: nil, tty: false)
+      raise ArgumentError, "session_id is required" if session_id.nil? || session_id.to_s.empty?
+
       sprite = Sprite.new(name: sprite_name, client: self, org: org)
       cmd = Cmd.new(sprite: sprite, name: "", args: [])
-      cmd.send(:session_id=, session_id)
+      cmd.send(:session_id=, session_id.to_s)
+      cmd.set_tty(true) if tty
       cmd
+    end
+
+    # HTTP kill：向 session 发送信号（默认 TERM）。WebSocket 信号不可用时的公共入口。
+    def kill_session(sprite_name, session_id, signal: "TERM")
+      raise ArgumentError, "session_id is required" if session_id.nil? || session_id.to_s.empty?
+
+      signal_session(sprite_name, session_id, signal)
     end
   end
 
@@ -30,8 +41,12 @@ module Sprites
       client.list_sessions(name)
     end
 
-    def attach_session(session_id)
-      client.attach_session(name, session_id, org: org)
+    def attach_session(session_id, tty: false)
+      client.attach_session(name, session_id, org: org, tty: tty)
+    end
+
+    def kill_session(session_id, signal: "TERM")
+      client.kill_session(name, session_id, signal: signal)
     end
   end
 end

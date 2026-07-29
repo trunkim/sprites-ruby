@@ -90,8 +90,13 @@ module Sprites
       return if @closed
 
       @closed = true
-      @read_thread&.kill
       @ws&.close rescue nil
+      if @read_thread
+        joined = @read_thread.join(2)
+        @read_thread.kill if joined.nil? && @read_thread.alive?
+      end
+      # 解除可能阻塞在 Queue#pop 上的读者
+      @read_queue << nil rescue nil
     end
 
     def closed?
