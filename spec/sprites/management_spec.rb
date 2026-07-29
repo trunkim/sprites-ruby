@@ -6,10 +6,11 @@ RSpec.describe Sprites::Management do
   let(:client) { Sprites::Client.new("test-token", base_url: "http://localhost:8080") }
 
   describe "#create_sprite" do
-    it "creates a sprite" do
+    it "creates a sprite with wait_for_capacity by default" do
       stub_request(:post, "http://localhost:8080/v1/sprites")
         .with(
-          headers: { "Authorization" => "Bearer test-token", "Content-Type" => "application/json" }
+          headers: { "Authorization" => "Bearer test-token", "Content-Type" => "application/json" },
+          body: hash_including("name" => "my-sprite", "wait_for_capacity" => true)
         )
         .to_return(
           status: 201,
@@ -55,17 +56,23 @@ RSpec.describe Sprites::Management do
       expect(sprite.id).to eq("sp-123")
     end
 
-    it "raises error for not found" do
+    it "raises typed APIError for not found" do
       stub_request(:get, "http://localhost:8080/v1/sprites/missing")
-        .to_return(status: 404)
+        .to_return(
+          status: 404,
+          body: JSON.generate({ error: "not_found", message: "sprite not found: missing" }),
+          headers: { "Content-Type" => "application/json" }
+        )
 
-      expect { client.get_sprite("missing") }.to raise_error(Sprites::Error, /not found/)
+      expect { client.get_sprite("missing") }.to raise_error(Sprites::APIError) { |err|
+        expect(err.status_code).to eq(404)
+      }
     end
   end
 
   describe "#list_sprites" do
     it "lists sprites with pagination" do
-      stub_request(:get, "http://localhost:8080/v1/sprites?max_results=100")
+      stub_request(:get, "http://localhost:8080/v1/sprites?max_results=50")
         .to_return(
           status: 200,
           body: JSON.generate({

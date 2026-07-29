@@ -114,10 +114,41 @@ module Sprites
     end
   end
 
+  # Management API 当前声明 max_results 合法范围为 1–50。
+  LIST_MAX_RESULTS_MIN = 1
+  LIST_MAX_RESULTS_MAX = 50
+  LIST_MAX_RESULTS_DEFAULT = LIST_MAX_RESULTS_MAX
+
   # 列出 sprites 时的分页/过滤选项
   ListOptions = Data.define(:prefix, :max_results, :continuation_token) do
-    def initialize(prefix: nil, max_results: 100, continuation_token: nil)
-      super
+    def initialize(prefix: nil, max_results: LIST_MAX_RESULTS_DEFAULT, continuation_token: nil)
+      super(
+        prefix: prefix,
+        max_results: self.class.clamp_max_results(max_results),
+        continuation_token: continuation_token
+      )
+    end
+
+    def self.clamp_max_results(value)
+      n = if value.nil?
+        LIST_MAX_RESULTS_DEFAULT
+      elsif value.is_a?(Integer)
+        value
+      elsif value.respond_to?(:to_int)
+        value.to_int
+      else
+        Integer(value, 10)
+      end
+
+      unless (LIST_MAX_RESULTS_MIN..LIST_MAX_RESULTS_MAX).cover?(n)
+        raise ArgumentError, "max_results must be between #{LIST_MAX_RESULTS_MIN} and #{LIST_MAX_RESULTS_MAX}"
+      end
+
+      n
+    rescue ArgumentError, TypeError => e
+      raise e if e.message.start_with?("max_results must be")
+
+      raise ArgumentError, "max_results must be an integer between #{LIST_MAX_RESULTS_MIN} and #{LIST_MAX_RESULTS_MAX}"
     end
   end
 
@@ -173,10 +204,15 @@ module Sprites
     end
   end
 
-  # 检查点（snapshot），可用于恢复 sprite 到某个时间点的状态
-  Checkpoint = Data.define(:id, :create_time, :history, :comment, :is_auto) do
-    def initialize(id: nil, create_time: nil, history: nil, comment: nil, is_auto: false)
+  # 检查点（snapshot）。list/get 对齐官方字段；create 流终态不解析文本，
+  # 调用方用 exact comment 再 list/get 解析唯一结果。
+  Checkpoint = Data.define(:id, :create_time, :source_id, :comment, :health, :is_auto) do
+    def initialize(id: nil, create_time: nil, source_id: nil, comment: nil, health: nil, is_auto: false)
       super
+    end
+
+    def healthy?
+      health.nil? || health.to_s.empty? || health.to_s == "healthy"
     end
 
     def self.from_hash(hash)
@@ -185,10 +221,44 @@ module Sprites
       new(
         id: hash["id"],
         create_time: hash["create_time"] ? Time.parse(hash["create_time"]) : nil,
-        history: hash["history"],
+        source_id: hash["source_id"],
         comment: hash["comment"],
+        health: hash["health"],
         is_auto: hash["is_auto"] || false
       )
+    end
+  end
+
+  # privileges / resources policy 的通用容器（与 network 并列的官方 policy 面）
+  PrivilegesPolicy = Data.define(:raw) do
+    def initialize(raw: {})
+      super
+    end
+
+    def to_h
+      raw.is_a?(Hash) ? raw : {}
+    end
+
+    def self.from_hash(hash)
+      return nil unless hash
+
+      new(raw: hash)
+    end
+  end
+
+  ResourcesPolicy = Data.define(:raw) do
+    def initialize(raw: {})
+      super
+    end
+
+    def to_h
+      raw.is_a?(Hash) ? raw : {}
+    end
+
+    def self.from_hash(hash)
+      return nil unless hash
+
+      new(raw: hash)
     end
   end
 

@@ -3,10 +3,7 @@
 require "json"
 
 module Sprites
-  # ── 控制连接池常量 ──
-  MAX_POOL_SIZE = 100       # 每个 sprite 最大连接数
-  POOL_DRAIN_THRESHOLD = 20 # 触发空闲连接清理的阈值
-  POOL_DRAIN_TARGET = 10    # 清理后保留的连接数
+  # ── 控制连接池常量（默认值；实际上限由 Client 注入）──
   DIAL_TIMEOUT = 30         # 新建连接的超时（秒）
   KEEP_ALIVE_WINDOW = 30    # keepalive 窗口（秒）
 
@@ -149,13 +146,43 @@ module Sprites
   #
   # 当池中连接数超过 POOL_DRAIN_THRESHOLD 时，自动清理最久未使用的空闲连接。
   class ControlPool
-    def initialize(client, sprite_name)
+    def initialize(client, sprite_name, max_size: nil, drain_threshold: nil, drain_target: nil)
       @client = client
       @sprite_name = sprite_name
+      @max_size = Integer(max_size || client.max_control_connections)
+      @drain_threshold = Integer(drain_threshold || client.control_drain_threshold)
+      @drain_target = Integer(drain_target || client.control_drain_target)
       @mutex = Mutex.new
       @conns = []
       @pending_dials = 0
       @closed = false
+    end
+
+    # @return [Integer] 当前池中连接数（含 busy）
+    def size
+      @mutex.synchronize { @conns.size }
+    end
+
+    # @return [Boolean] 池是否已关闭
+    def closed?
+      @mutex.synchronize { @closed }
+    end
+
+    # 将探测到的空闲连接纳入池中（不修改 private ivar）
+    def offer_idle(conn)
+      return unless conn
+
+      @mutex.synchronize do
+        if @closed
+          conn.close
+          return
+        end
+
+        conn.busy = false
+        conn.last_used = Time.now
+        @conns << conn unless @conns.include?(conn)
+        try_drain
+      end
     end
 
     # 获取一个可用连接（优先复用空闲连接，否则新建）
@@ -184,8 +211,8 @@ module Sprites
           return idle
         end
 
-        if @conns.size + @pending_dials >= MAX_POOL_SIZE
-          raise Error, "no available connections in pool (at cap #{MAX_POOL_SIZE})"
+        if @conns.size + @pending_dials >= @max_size
+          raise Error, "no available connections in pool (at cap #{@max_size})"
         end
 
         # 在锁外新建连接，避免阻塞其他操作
@@ -262,12 +289,12 @@ module Sprites
 
     # 当连接数超过阈值时，关闭最久未使用的空闲连接（LRU）
     def try_drain
-      return if @closed || @conns.size <= POOL_DRAIN_THRESHOLD
+      return if @closed || @conns.size <= @drain_threshold
 
       idles = @conns.select { |c| !c.busy? && !c.closed? }
                      .sort_by(&:last_used)
 
-      to_close = @conns.size - POOL_DRAIN_TARGET
+      to_close = @conns.size - @drain_target
       return if to_close <= 0 || idles.empty?
 
       to_close = [to_close, idles.size].min

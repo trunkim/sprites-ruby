@@ -25,6 +25,31 @@ RSpec.describe Sprites::SpriteConfig do
   end
 end
 
+RSpec.describe Sprites::ListOptions do
+  it "defaults max_results to 50" do
+    expect(described_class.new.max_results).to eq(50)
+  end
+
+  it "rejects values above 50" do
+    expect { described_class.new(max_results: 100) }.to raise_error(ArgumentError, /1 and 50/)
+  end
+end
+
+RSpec.describe Sprites::Checkpoint do
+  it "parses official list/get fields" do
+    cp = described_class.from_hash(
+      "id" => "v1",
+      "create_time" => "2026-04-24T17:25:27Z",
+      "source_id" => "src",
+      "comment" => "c",
+      "health" => "unhealthy"
+    )
+    expect(cp.source_id).to eq("src")
+    expect(cp.health).to eq("unhealthy")
+    expect(cp).not_to be_healthy
+  end
+end
+
 RSpec.describe Sprites::Session do
   describe ".from_hash" do
     it "creates from hash" do

@@ -145,28 +145,25 @@ module Sprites
     end
 
     def perform_request(uri, req)
-      http = Net::HTTP.new(uri.host, uri.port)
-      http.use_ssl = uri.scheme == "https"
-      http.open_timeout = 30
-      http.read_timeout = 30
-      http.request(req)
+      @sprite.client.request(uri, req)
     end
 
     def raise_fs_error!(op, path, resp)
-      if resp.code.to_i == 404
-        raise FSNotFoundError.new(op, path)
+      status = resp.code.to_i
+      if status == 404
+        raise FSNotFoundError.new(op, path, status_code: status)
       end
 
       begin
         data = JSON.parse(resp.body)
         if data["error"]
-          raise FSError.new(op, path, data["error"])
+          raise FSError.new(op, path, data["error"], status_code: status)
         end
       rescue JSON::ParserError
         # ignore
       end
 
-      raise FSError.new(op, path, "HTTP #{resp.code}")
+      raise FSError.new(op, path, "HTTP #{resp.code}", status_code: status)
     end
   end
 
@@ -187,18 +184,19 @@ module Sprites
   end
 
   class FSError < Error
-    attr_reader :op, :path
+    attr_reader :op, :path, :status_code
 
-    def initialize(op, path, message)
+    def initialize(op, path, message, status_code: nil)
       @op = op
       @path = path
+      @status_code = status_code
       super("#{op} #{path}: #{message}")
     end
   end
 
   class FSNotFoundError < FSError
-    def initialize(op, path)
-      super(op, path, "file not found")
+    def initialize(op, path, status_code: 404)
+      super(op, path, "file not found", status_code: status_code)
     end
   end
 
