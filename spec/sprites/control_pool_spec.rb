@@ -55,4 +55,43 @@ RSpec.describe Sprites::ControlPool do
     expect(pool).to be_closed
     expect(pool.size).to eq(0)
   end
+
+  it "raises at cap when all connections are busy" do
+    pool = described_class.new(client, "demo", max_size: 1)
+    ws = instance_double(Sprites::WebSocketConnection, close: true, write_text: true, read_message: nil)
+    conn = Sprites::ControlConn.new(ws)
+    allow(pool).to receive(:dial).and_return(conn)
+
+    first = pool.checkout
+    expect(first).to eq(conn)
+    expect(first.busy?).to be true
+
+    expect {
+      pool.checkout
+    }.to raise_error(Sprites::Error, /no available connections in pool \(at cap 1\)/)
+  end
+
+  it "drains idle connections down to drain_target when over threshold" do
+    pool = described_class.new(
+      client,
+      "demo",
+      max_size: 4,
+      drain_threshold: 2,
+      drain_target: 1
+    )
+
+    3.times do
+      ws = instance_double(Sprites::WebSocketConnection, close: true, write_text: true)
+      pool.offer_idle(Sprites::ControlConn.new(ws))
+    end
+
+    expect(pool.size).to eq(1)
+  end
+
+  it "checkout after close raises" do
+    pool = described_class.new(client, "demo", max_size: 1)
+    pool.close
+
+    expect { pool.checkout }.to raise_error(Sprites::Error, /pool is closed/)
+  end
 end

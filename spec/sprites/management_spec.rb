@@ -92,6 +92,48 @@ RSpec.describe Sprites::Management do
     end
   end
 
+  describe "#list_all_sprites_result" do
+    it "follows continuation_token across pages until has_more is false" do
+      stub_request(:get, "http://localhost:8080/v1/sprites?max_results=50")
+        .to_return(
+          status: 200,
+          body: JSON.generate({
+            sprites: [ { name: "sprite-1", status: "running" } ],
+            has_more: true,
+            next_continuation_token: "tok-page-2"
+          }),
+          headers: { "Content-Type" => "application/json" }
+        )
+      stub_request(:get, "http://localhost:8080/v1/sprites?max_results=50&continuation_token=tok-page-2")
+        .to_return(
+          status: 200,
+          body: JSON.generate({
+            sprites: [ { name: "sprite-2", status: "cold" } ],
+            has_more: false
+          }),
+          headers: { "Content-Type" => "application/json" }
+        )
+
+      result = client.list_all_sprites_result
+      expect(result.sprites.map(&:name)).to eq(%w[sprite-1 sprite-2])
+    end
+
+    it "stops when has_more is true but next_continuation_token is missing" do
+      stub_request(:get, "http://localhost:8080/v1/sprites?max_results=50")
+        .to_return(
+          status: 200,
+          body: JSON.generate({
+            sprites: [ { name: "sprite-1", status: "running" } ],
+            has_more: true
+          }),
+          headers: { "Content-Type" => "application/json" }
+        )
+
+      result = client.list_all_sprites_result
+      expect(result.sprites.map(&:name)).to eq(%w[sprite-1])
+    end
+  end
+
   describe "#delete_sprite" do
     it "deletes a sprite" do
       stub_request(:delete, "http://localhost:8080/v1/sprites/my-sprite")
