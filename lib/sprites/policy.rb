@@ -1,8 +1,8 @@
 # frozen_string_literal: true
 
-# 网络策略管理
+# 策略管理：network / privileges / resources
 #
-# 控制 sprite 的出站网络访问规则（允许/拒绝特定域名）。
+# 控制 sprite 的出站网络、权限与资源策略。
 
 require "json"
 
@@ -20,8 +20,44 @@ module Sprites
       case resp.code.to_i
       when 204 then nil
       when 400
-        body = resp.body
-        raise Error, "invalid policy: #{body}"
+        api_err = APIError.parse(resp, resp.body)
+        raise api_err if api_err
+
+        raise Error, "invalid policy: #{resp.body}"
+      else
+        parse_response!(resp)
+      end
+    end
+
+    def get_privileges_policy(sprite_name)
+      resp = http_get("/v1/sprites/#{sprite_name}/policy/privileges")
+      data = parse_response!(resp)
+      PrivilegesPolicy.from_hash(data)
+    end
+
+    def update_privileges_policy(sprite_name, policy)
+      body = policy.respond_to?(:to_h) ? policy.to_h : policy
+      resp = http_post("/v1/sprites/#{sprite_name}/policy/privileges", body)
+
+      case resp.code.to_i
+      when 204 then nil
+      else
+        parse_response!(resp)
+      end
+    end
+
+    def get_resources_policy(sprite_name)
+      resp = http_get("/v1/sprites/#{sprite_name}/policy/resources")
+      data = parse_response!(resp)
+      ResourcesPolicy.from_hash(data)
+    end
+
+    def update_resources_policy(sprite_name, policy)
+      body = policy.respond_to?(:to_h) ? policy.to_h : policy
+      resp = http_post("/v1/sprites/#{sprite_name}/policy/resources", body)
+
+      case resp.code.to_i
+      when 204 then nil
       else
         parse_response!(resp)
       end
@@ -35,6 +71,22 @@ module Sprites
 
     def update_network_policy(policy)
       client.update_network_policy(name, policy)
+    end
+
+    def get_privileges_policy
+      client.get_privileges_policy(name)
+    end
+
+    def update_privileges_policy(policy)
+      client.update_privileges_policy(name, policy)
+    end
+
+    def get_resources_policy
+      client.get_resources_policy(name)
+    end
+
+    def update_resources_policy(policy)
+      client.update_resources_policy(name, policy)
     end
   end
 end

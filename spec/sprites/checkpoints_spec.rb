@@ -11,7 +11,14 @@ RSpec.describe Sprites::Checkpoints do
         .to_return(
           status: 200,
           body: JSON.generate([
-            { "id" => "v2", "create_time" => "2026-04-24T17:40:17Z", "comment" => "before deploy", "is_auto" => false },
+            {
+              "id" => "v2",
+              "create_time" => "2026-04-24T17:40:17Z",
+              "source_id" => "src-1",
+              "comment" => "before deploy",
+              "health" => "healthy",
+              "is_auto" => false
+            },
             { "id" => "v1", "create_time" => "2026-04-24T17:25:27Z", "comment" => nil, "is_auto" => false },
             { "id" => "v0", "create_time" => "2026-04-24T17:25:27Z", "comment" => nil, "is_auto" => true }
           ]),
@@ -22,6 +29,9 @@ RSpec.describe Sprites::Checkpoints do
       expect(checkpoints.size).to eq(3)
       expect(checkpoints[0].id).to eq("v2")
       expect(checkpoints[0].comment).to eq("before deploy")
+      expect(checkpoints[0].source_id).to eq("src-1")
+      expect(checkpoints[0].health).to eq("healthy")
+      expect(checkpoints[0]).to be_healthy
       expect(checkpoints[2].is_auto).to be true
     end
 

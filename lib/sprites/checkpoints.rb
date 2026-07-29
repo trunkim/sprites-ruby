@@ -3,8 +3,8 @@
 # 检查点（Checkpoint）管理
 #
 # 检查点是 sprite 的快照，可用于备份和恢复状态。
-# 创建和恢复操作返回流式响应（CheckpointStream / RestoreStream），
-# 可逐行读取进度消息。
+# 创建和恢复操作返回流式响应（CheckpointStream / RestoreStream）。
+# create 的 terminal 文本不可靠；调用方用 exact comment 再 list/get 解析唯一 typed 结果。
 
 require "json"
 
@@ -15,7 +15,23 @@ module Sprites
       payload[:comment] = comment if comment && !comment.empty?
 
       resp = http_post_stream("/v1/sprites/#{sprite_name}/checkpoint", payload)
+      unless [200, 201].include?(resp.code.to_i)
+        api_err = APIError.parse(resp, resp.body)
+        raise api_err if api_err
+
+        raise Error, "create checkpoint failed (status #{resp.code}): #{resp.body}"
+      end
+
       CheckpointStream.new(resp.body)
+    end
+
+    # 消费 create 流并校验 error/complete 终态；不从 terminal 文本解析 checkpoint id。
+    def create_checkpoint!(sprite_name, comment:)
+      raise ArgumentError, "comment is required for correlation" if comment.nil? || comment.to_s.empty?
+
+      stream = create_checkpoint(sprite_name, comment: comment)
+      stream.drain!
+      find_checkpoint_by_comment!(sprite_name, comment)
     end
 
     def list_checkpoints(sprite_name, history_filter: nil, include_auto: false)
@@ -37,8 +53,32 @@ module Sprites
       Checkpoint.from_hash(data)
     end
 
+    # 按 caller 提供的 exact comment 解析唯一 checkpoint；0 或多于 1 个均 fail closed。
+    def find_checkpoint_by_comment!(sprite_name, comment)
+      matches = list_checkpoints(sprite_name, include_auto: true).select { |c| c.comment.to_s == comment.to_s }
+      if matches.empty?
+        raise APIError.new(
+          status_code: 404,
+          error_code: "not_found",
+          message: "checkpoint not found for comment: #{comment}"
+        )
+      end
+      if matches.size > 1
+        raise Error, "ambiguous checkpoint comment #{comment.inspect}: #{matches.size} matches"
+      end
+
+      matches.first
+    end
+
     def restore_checkpoint(sprite_name, checkpoint_id)
       resp = http_post_stream("/v1/sprites/#{sprite_name}/checkpoints/#{checkpoint_id}/restore", nil)
+      unless [200, 201].include?(resp.code.to_i)
+        api_err = APIError.parse(resp, resp.body)
+        raise api_err if api_err
+
+        raise Error, "restore checkpoint failed (status #{resp.code}): #{resp.body}"
+      end
+
       RestoreStream.new(resp.body)
     end
 
@@ -55,12 +95,20 @@ module Sprites
       client.create_checkpoint(name, comment: comment)
     end
 
+    def create_checkpoint!(comment:)
+      client.create_checkpoint!(name, comment: comment)
+    end
+
     def list_checkpoints(history_filter: nil, include_auto: false)
       client.list_checkpoints(name, history_filter: history_filter, include_auto: include_auto)
     end
 
     def get_checkpoint(checkpoint_id)
       client.get_checkpoint(name, checkpoint_id)
+    end
+
+    def find_checkpoint_by_comment!(comment)
+      client.find_checkpoint_by_comment!(name, comment)
     end
 
     def restore_checkpoint(checkpoint_id)

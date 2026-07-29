@@ -49,6 +49,22 @@ module Sprites
       close
     end
 
+    # 消费全部消息并校验终态：遇到 error 立即失败；必须以 complete 结束。
+    def drain!
+      saw_complete = false
+      process_all do |msg|
+        case msg.type.to_s
+        when "error"
+          detail = msg.error.to_s
+          detail = msg.data.to_s if detail.empty?
+          raise Error, detail.empty? ? "checkpoint stream error" : detail
+        when "complete"
+          saw_complete = true
+        end
+      end
+      raise Error, "checkpoint stream ended without complete" unless saw_complete
+    end
+
     include Enumerable
 
     def each(&block)
@@ -94,6 +110,21 @@ module Sprites
       end
     ensure
       close
+    end
+
+    def drain!
+      saw_complete = false
+      process_all do |msg|
+        case msg.type.to_s
+        when "error"
+          detail = msg.error.to_s
+          detail = msg.data.to_s if detail.empty?
+          raise Error, detail.empty? ? "restore stream error" : detail
+        when "complete"
+          saw_complete = true
+        end
+      end
+      raise Error, "restore stream ended without complete" unless saw_complete
     end
 
     include Enumerable

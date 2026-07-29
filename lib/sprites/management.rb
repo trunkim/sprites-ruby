@@ -12,10 +12,12 @@ require "net/http"
 
 module Sprites
   module Management
-    def create_sprite(name, config: nil, org: nil, labels: nil)
+    # @param wait_for_capacity [Boolean] 官方 create body 字段；默认 true
+    def create_sprite(name, config: nil, org: nil, labels: nil, wait_for_capacity: true)
       body = { name: name }
       body[:config] = config.to_h if config
       body[:labels] = labels if labels
+      body[:wait_for_capacity] = wait_for_capacity unless wait_for_capacity.nil?
 
       resp = http_post("/v1/sprites", body)
       data = parse_response!(resp, expected: 201)
@@ -29,7 +31,14 @@ module Sprites
       resp = http_get("/v1/sprites/#{name}")
 
       if resp.code.to_i == 404
-        raise Error, "sprite not found: #{name}"
+        api_err = APIError.parse(resp, resp.body)
+        raise api_err if api_err
+
+        raise APIError.new(
+          status_code: 404,
+          error_code: "not_found",
+          message: "sprite not found: #{name}"
+        )
       end
 
       data = parse_response!(resp)
@@ -78,7 +87,7 @@ module Sprites
       loop do
         opts = ListOptions.new(
           prefix: prefix,
-          max_results: 100,
+          max_results: LIST_MAX_RESULTS_DEFAULT,
           continuation_token: continuation_token
         )
 

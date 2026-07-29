@@ -76,8 +76,8 @@ module Sprites
       @use_legacy_exec_endpoint
     end
 
-    # 延迟检测控制连接支持（首次命令执行时调用）
-    # 尝试建立一个控制连接，成功则加入池中
+    # 延迟检测控制连接支持（首次命令执行时调用；Client#sprite 本身零 I/O）
+    # 尝试建立一个控制连接，成功则通过 pool.offer_idle 归还复用。
     def ensure_control_support
       return if @control_checked
 
@@ -93,12 +93,7 @@ module Sprites
         conn = pool.dial
         @supports_control = true
         Sprites.dbg("sprites: control supported", sprite: @name)
-
-        # 将首次探测连接加入池中复用
-        conn.busy = false
-        pool.instance_variable_get(:@mutex).synchronize do
-          pool.instance_variable_get(:@conns) << conn
-        end
+        pool.offer_idle(conn)
       rescue => e
         Sprites.dbg("sprites: control not available", sprite: @name, err: e.message)
         @supports_control = false
