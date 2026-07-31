@@ -60,6 +60,39 @@ RSpec.describe Sprites::Cmd do
         expect(body.dig("args", "max_run_after_disconnect")).to eq("12")
       end
     end
+
+    it "收到 exit frame 后等待 op.complete 才结束 control operation" do
+      ws = Sprites::WsCmd.new(url: "wss://example/exec", headers: {}, name: "echo", args: [])
+      ws.using_control = true
+      output = StringIO.new
+      ws.stdout = output
+      messages = Queue.new
+      messages << [:binary, [Sprites::STREAM_STDOUT].pack("C") + "ok"]
+      messages << [:binary, [Sprites::STREAM_EXIT, 0].pack("CC")]
+      messages << [:text, "control:" + JSON.generate(type: "op.complete", args: { exitCode: 0 })]
+      control_conn = instance_double(Sprites::ControlConn)
+      allow(control_conn).to receive(:read_message) { messages.pop }
+      ws.control_conn = control_conn
+
+      ws.send(:run_stream_io)
+
+      expect(output.string).to eq("ok")
+      expect(ws.exit_code).to eq(0)
+      expect(control_conn).to have_received(:read_message).exactly(3).times
+    end
+
+    it "把 op.error 保留为 command error" do
+      ws = Sprites::WsCmd.new(url: "wss://example/exec", headers: {}, name: "echo", args: [])
+
+      terminal = ws.send(
+        :handle_control_message,
+        "control:" + JSON.generate(type: "op.error", args: { error: "busy" })
+      )
+
+      expect(terminal).to be true
+      expect(ws.operation_error).to be_a(Sprites::Error)
+      expect(ws.operation_error.message).to eq("busy")
+    end
   end
 
   describe "#signal" do

@@ -248,7 +248,6 @@ module Sprites
     def checkin_control_conn(conn)
       return unless conn
 
-      conn.send_release rescue nil
       pool = client.get_or_create_pool(name)
       pool.checkin(conn)
     end

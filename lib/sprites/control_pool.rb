@@ -14,7 +14,6 @@ module Sprites
   # - 后台 read_loop 线程，根据 busy 状态决定消息去向：
   #   - busy=true：消息入 read_queue，供 WsCmd 消费
   #   - busy=false：消息在 read_loop 中就地处理（keepalive 等）
-  # - send_release：发送 {"type":"release"} 归还连接
   class ControlConn
     attr_reader :ws
 
@@ -82,10 +81,6 @@ module Sprites
     end
 
     # 发送释放消息，通知服务端此连接可复用
-    def send_release
-      @ws.write_text(JSON.generate({ type: "release" })) rescue nil
-    end
-
     def close
       return if @closed
 

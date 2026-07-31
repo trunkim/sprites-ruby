@@ -18,7 +18,7 @@ module Sprites
     attr_accessor :path, :args, :stdin, :stdout, :stderr, :env, :dir,
                   :tty, :is_attach, :attach_session_id, :max_run_after_disconnect,
                   :text_message_handler, :existing_conn, :using_control, :control_conn
-    attr_reader :session_id, :capabilities
+    attr_reader :session_id, :capabilities, :operation_error
 
     def initialize(url:, headers:, name:, args: [], ctx: nil)
       @url = url
@@ -44,6 +44,7 @@ module Sprites
       @done_cond = ConditionVariable.new
       @session_id = nil
       @capabilities = {}
+      @operation_error = nil
       @env = nil
       @dir = nil
     end
@@ -290,9 +291,8 @@ module Sprites
         when :binary
           out.write(data)
         when :text
-          # 跳过控制连接内部消息
           if data.start_with?("control:")
-            Sprites.dbg("sprites: pty received control message", data: data)
+            return if handle_control_message(data)
             next
           end
 
@@ -305,6 +305,8 @@ module Sprites
               @text_message_handler&.call(data)
               @received_exit = true
               @exit_code = parsed["exit_code"] || 0
+              next if @using_control
+
               close_adapter
               return
             end
@@ -342,6 +344,7 @@ module Sprites
         case msg_type
         when :text
           if data.start_with?("control:")
+            return if handle_control_message(data)
             next
           end
 
@@ -354,6 +357,8 @@ module Sprites
               @text_message_handler&.call(data)
               @received_exit = true
               @exit_code = parsed["exit_code"] || 0
+              next if @using_control
+
               close_adapter
               return
             end
@@ -374,6 +379,8 @@ module Sprites
           when STREAM_EXIT
             @received_exit = true
             @exit_code = payload.empty? ? 0 : payload.getbyte(0)
+            next if @using_control
+
             close_adapter
             return
           end
@@ -384,6 +391,29 @@ module Sprites
       end
 
       close_adapter
+    end
+
+    # control connection 的可复用边界是 op.complete，不是进程 exit frame。
+    # exit 只说明命令已退出；服务端仍需完成本次 operation 的收尾与串行化。
+    def handle_control_message(data)
+      message = JSON.parse(data.delete_prefix("control:"))
+      case message["type"]
+      when "op.complete"
+        args = message["args"].is_a?(Hash) ? message["args"] : {}
+        unless @received_exit
+          @received_exit = true
+          @exit_code = args["exitCode"] || args["exit_code"] || 0
+        end
+        true
+      when "op.error"
+        args = message["args"].is_a?(Hash) ? message["args"] : {}
+        @operation_error = Error.new(args["error"].to_s.empty? ? "control operation failed" : args["error"])
+        true
+      else
+        false
+      end
+    rescue JSON::ParserError
+      false
     end
 
     # 控制连接模式下不关闭 adapter（因为 WebSocket 是共享的）

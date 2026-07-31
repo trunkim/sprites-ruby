@@ -195,6 +195,7 @@ module Sprites
       begin
         @ws_cmd.wait
         @exit_code = @ws_cmd.exit_code
+        operation_error = @ws_cmd.operation_error
       ensure
         @stdin_pipe&.close rescue nil
         release_control_conn!(@control_conn)
@@ -205,7 +206,9 @@ module Sprites
       @mutex.synchronize do
         @finished = true
 
-        if @exit_code == -1
+        if operation_error
+          @wait_err = operation_error
+        elsif @exit_code == -1
           @wait_err = Error.new("connection closed")
         elsif @exit_code != 0
           @wait_err = ExitError.new(@exit_code)
@@ -456,7 +459,6 @@ module Sprites
     def release_control_conn!(conn)
       return unless conn
 
-      conn.send_release rescue nil
       pool = @sprite.client.get_or_create_pool(@sprite.name)
       pool.checkin(conn)
       Sprites.dbg("sprites: returned control conn after exec", sprite: @sprite.name)
