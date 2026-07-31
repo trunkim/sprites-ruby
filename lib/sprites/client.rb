@@ -81,6 +81,7 @@ module Sprites
       @http_mutex = Mutex.new
       @owns_http_client = http_client.nil?
       @http_client = http_client
+      disable_implicit_http_retries!(@http_client)
       @closed = false
     end
 
@@ -278,6 +279,13 @@ module Sprites
       http.open_timeout = @http_timeout if http.respond_to?(:open_timeout=)
       http.read_timeout = @http_timeout if http.respond_to?(:read_timeout=)
       http.keep_alive_timeout = @http_timeout if http.respond_to?(:keep_alive_timeout=)
+      disable_implicit_http_retries!(http)
+    end
+
+    # Net::HTTP 默认会隐式重试 idempotent request，使上层 deadline 与重试策略失真。
+    # SDK 只做一次 wire attempt；是否重试由理解业务语义的调用方决定。
+    def disable_implicit_http_retries!(http)
+      http.max_retries = 0 if http&.respond_to?(:max_retries=)
     end
 
     # ── HTTP 便捷方法 ──
