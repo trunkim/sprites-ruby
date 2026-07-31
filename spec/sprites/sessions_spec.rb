@@ -23,6 +23,23 @@ RSpec.describe Sprites::Sessions do
       expect(sessions.first.id).to eq("s1")
       expect(sessions.first.tty).to be true
     end
+
+    it "forwards a bounded read timeout" do
+      response = Struct.new(:code, :body) do
+        def [](_key) = nil
+      end.new("200", JSON.generate({ sessions: [] }))
+      http = instance_double(Net::HTTP, read_timeout: 30, "read_timeout=": nil)
+      allow(http).to receive(:request).and_return(response)
+      bounded = Sprites::Client.new(
+        "test-token",
+        base_url: "http://localhost:8080",
+        http_client: http
+      )
+
+      expect(bounded.list_sessions("demo", timeout: 2)).to eq([])
+      expect(http).to have_received(:read_timeout=).with(2).ordered
+      expect(http).to have_received(:read_timeout=).with(30).ordered
+    end
   end
 
   describe "#attach_session" do

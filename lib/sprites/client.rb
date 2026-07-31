@@ -276,14 +276,14 @@ module Sprites
 
     # ── HTTP 便捷方法 ──
 
-    def http_get(path, params: {})
+    def http_get(path, params: {}, read_timeout: nil)
       uri = URI("#{@base_url}#{path}")
       uri.query = URI.encode_www_form(params) unless params.empty?
 
       req = Net::HTTP::Get.new(uri)
       req["Authorization"] = "Bearer #{@token}"
 
-      request(uri, req)
+      request(uri, req, read_timeout: read_timeout)
     end
 
     def http_post(path, body)

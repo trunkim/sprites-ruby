@@ -225,6 +225,15 @@ module Sprites
       @control_conn = nil
     end
 
+    # 只断开当前命令占用的 transport，不关闭 Client，也不向远端发送 signal。
+    # 远端命令是否继续运行由 max_run_after_disconnect 决定；调用方必须另行确认
+    # session 终态，不能把 transport 断开本身当作命令已经结束。
+    def disconnect
+      ws_cmd = @mutex.synchronize { @ws_cmd }
+      ws_cmd&.disconnect
+      nil
+    end
+
     # 执行命令并返回 stdout 内容
     # @return [Array(String, nil)] [输出内容, 错误]
     def output

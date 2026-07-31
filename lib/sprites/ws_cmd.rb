@@ -95,6 +95,17 @@ module Sprites
       @done_mutex.synchronize { @done }
     end
 
+    # 中断当前命令的本地 I/O。control 模式必须关闭当前 checkout 的
+    # ControlConn，才能唤醒阻塞在 read_queue 的 reader；不能关闭整个 Client。
+    def disconnect
+      if @using_control && @control_conn
+        @control_conn.close
+      else
+        @adapter&.close || @conn&.close
+      end
+      nil
+    end
+
     private
 
     # ── 连接建立与 I/O 循环主流程 ──

@@ -9,8 +9,8 @@ require "json"
 
 module Sprites
   module Sessions
-    def list_sessions(sprite_name)
-      resp = http_get("/v1/sprites/#{sprite_name}/exec")
+    def list_sessions(sprite_name, timeout: nil)
+      resp = http_get("/v1/sprites/#{sprite_name}/exec", read_timeout: timeout)
       data = parse_response!(resp)
 
       sessions_raw = data["sessions"] || []
@@ -37,8 +37,8 @@ module Sprites
   end
 
   class Sprite
-    def list_sessions
-      client.list_sessions(name)
+    def list_sessions(timeout: nil)
+      client.list_sessions(name, timeout: timeout)
     end
 
     def attach_session(session_id, tty: false)

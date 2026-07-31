@@ -75,4 +75,27 @@ RSpec.describe Sprites::Cmd do
       expect(client).to have_received(:signal_session).with("demo", "42", "KILL")
     end
   end
+
+  describe "#disconnect" do
+    it "只委托当前 WsCmd，不关闭共享 Client" do
+      cmd = described_class.new(sprite: sprite, name: "sleep", args: ["60"])
+      ws_cmd = instance_double(Sprites::WsCmd, disconnect: nil)
+      cmd.instance_variable_set(:@ws_cmd, ws_cmd)
+
+      expect { cmd.disconnect }.not_to raise_error
+      expect(ws_cmd).to have_received(:disconnect)
+      expect(client).not_to receive(:close)
+    end
+
+    it "control 模式关闭当前 ControlConn 以唤醒 reader" do
+      ws_cmd = Sprites::WsCmd.new(url: "wss://example/exec", headers: {}, name: "sleep", args: ["60"])
+      control_conn = instance_double(Sprites::ControlConn, close: nil)
+      ws_cmd.using_control = true
+      ws_cmd.control_conn = control_conn
+
+      ws_cmd.disconnect
+
+      expect(control_conn).to have_received(:close)
+    end
+  end
 end
