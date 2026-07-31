@@ -227,35 +227,35 @@ module Sprites
 
     # 执行 HTTP 请求并自动捕获版本头
     def perform_request(uri, req, read_timeout: nil)
-      raise Error, "client is closed" if @closed
-
-      http = http_transport_for(uri)
-      previous_read = nil
-      if read_timeout && http.respond_to?(:read_timeout=)
-        previous_read = http.read_timeout
-        http.read_timeout = read_timeout
-      end
-
-      resp = http.request(req)
-      capture_version(resp)
-      resp
-    ensure
-      http.read_timeout = previous_read if http && previous_read && http.respond_to?(:read_timeout=)
-    end
-
-    def http_transport_for(uri)
       @http_mutex.synchronize do
         raise Error, "client is closed" if @closed
 
-        if @http_client
-          configure_http!(@http_client, uri) if @owns_http_client
-          return @http_client
+        http = http_transport_for(uri)
+        previous_read = nil
+        if read_timeout && http.respond_to?(:read_timeout=)
+          previous_read = http.read_timeout
+          http.read_timeout = read_timeout
         end
 
-        @http_client = build_http(uri)
-        @owns_http_client = true
-        @http_client
+        begin
+          resp = http.request(req)
+          capture_version(resp)
+          resp
+        ensure
+          http.read_timeout = previous_read if previous_read && http.respond_to?(:read_timeout=)
+        end
       end
+    end
+
+    def http_transport_for(uri)
+      if @http_client
+        configure_http!(@http_client, uri) if @owns_http_client
+        return @http_client
+      end
+
+      @http_client = build_http(uri)
+      @owns_http_client = true
+      @http_client
     end
 
     def build_http(uri)

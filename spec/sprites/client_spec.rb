@@ -70,5 +70,46 @@ RSpec.describe Sprites::Client do
       expect(sprite.name).to eq("my-sprite")
       expect(fake.requests.first).to be_a(Net::HTTP::Get)
     end
+
+    it "serializes concurrent requests on one injected transport" do
+      response = Struct.new(:code, :body) do
+        def [](_key) = nil
+      end.new("200", "{}")
+      fake = Class.new do
+        attr_reader :overlapped
+
+        def initialize(response)
+          @response = response
+          @mutex = Mutex.new
+          @active = 0
+          @overlapped = false
+        end
+
+        def request(_req)
+          @mutex.synchronize do
+            @active += 1
+            @overlapped = true if @active > 1
+          end
+          sleep 0.02
+          @response
+        ensure
+          @mutex.synchronize { @active -= 1 }
+        end
+      end.new(response)
+      client = described_class.new(token, base_url: "http://localhost:8080", http_client: fake)
+      uri = URI("http://localhost:8080/v1/sprites")
+      start = Queue.new
+
+      threads = 2.times.map do
+        Thread.new do
+          start.pop
+          client.request(uri, Net::HTTP::Get.new(uri))
+        end
+      end
+      2.times { start << true }
+      threads.each(&:join)
+
+      expect(fake.overlapped).to be false
+    end
   end
 end
