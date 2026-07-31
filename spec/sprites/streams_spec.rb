@@ -23,6 +23,22 @@ RSpec.describe Sprites::NDJSONStream do
     expect(enumerator.to_a).to eq([1])
     expect(stream).to be_closed
   end
+
+  it "releases the body when direct next_item consumption reaches EOF or fails" do
+    complete_body = StringIO.new("{\"value\":1}\n")
+    complete = described_class.new(complete_body) { |data| data.fetch("value") }
+    expect(complete.next_item).to eq(1)
+    expect(complete.next_item).to be_nil
+    expect(complete).to be_closed
+    expect(complete_body).to be_closed
+
+    failing_body = Object.new
+    failing_body.define_singleton_method(:gets) { raise IOError, "broken" }
+    failing_body.define_singleton_method(:close) { @closed = true }
+    failing = described_class.new(failing_body)
+    expect { failing.next_item }.to raise_error(Sprites::Error, /stream read failed/)
+    expect(failing).to be_closed
+  end
 end
 
 RSpec.describe Sprites::CheckpointStream do

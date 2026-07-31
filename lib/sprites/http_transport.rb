@@ -29,17 +29,42 @@ module Sprites
       @pid = Process.pid
     end
 
-    def request(uri, request, read_timeout: nil, open_timeout: nil)
+    def request(uri, request, read_timeout: nil, open_timeout: nil, write_timeout: nil)
       validate_origin!(uri)
       connection = checkout
       reusable = false
 
       begin
-        response = with_timeouts(connection, read_timeout:, open_timeout:) do
+        response = with_timeouts(connection, read_timeout:, open_timeout:, write_timeout:) do
           connection.request(request)
         end
         reusable = reusable?(connection, response)
         response
+      ensure
+        reusable ? checkin(connection) : discard(connection)
+      end
+    end
+
+    # 在调用线程内消费 response body，保留 Net::HTTP#read_body 交付的 chunk 边界。
+    # 适用于 HTTP exec 这类不能把 response 交给池外异步消费的协议。
+    def request_stream(uri, request, read_timeout: nil, open_timeout: nil, write_timeout: nil)
+      raise ArgumentError, "block is required" unless block_given?
+
+      validate_origin!(uri)
+      connection = checkout
+      response = nil
+      result = nil
+      reusable = false
+
+      begin
+        with_timeouts(connection, read_timeout:, open_timeout:, write_timeout:) do
+          connection.request(request) do |current_response|
+            response = current_response
+            result = yield current_response
+          end
+        end
+        reusable = reusable?(connection, response)
+        result
       ensure
         reusable ? checkin(connection) : discard(connection)
       end
@@ -144,11 +169,13 @@ module Sprites
       close_connection(connection) if removed || connection
     end
 
-    def with_timeouts(connection, read_timeout:, open_timeout:)
+    def with_timeouts(connection, read_timeout:, open_timeout:, write_timeout:)
       previous_read = connection.read_timeout if read_timeout && connection.respond_to?(:read_timeout)
       previous_open = connection.open_timeout if open_timeout && connection.respond_to?(:open_timeout)
+      previous_write = connection.write_timeout if write_timeout && connection.respond_to?(:write_timeout)
       connection.read_timeout = read_timeout if read_timeout && connection.respond_to?(:read_timeout=)
       connection.open_timeout = open_timeout if open_timeout && connection.respond_to?(:open_timeout=)
+      connection.write_timeout = write_timeout if write_timeout && connection.respond_to?(:write_timeout=)
       yield
     ensure
       if read_timeout && connection.respond_to?(:read_timeout=)
@@ -156,6 +183,9 @@ module Sprites
       end
       if open_timeout && connection.respond_to?(:open_timeout=)
         connection.open_timeout = previous_open
+      end
+      if write_timeout && connection.respond_to?(:write_timeout=)
+        connection.write_timeout = previous_write
       end
     end
 

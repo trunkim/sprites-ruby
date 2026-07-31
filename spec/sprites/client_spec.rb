@@ -34,6 +34,37 @@ RSpec.describe Sprites::Client do
       expect { client.close }.not_to raise_error
     end
 
+    it "closes every registered connection and fences late registration" do
+      resource_class = Class.new do
+        attr_reader :closed
+
+        def initialize(raise_on_close: false)
+          @raise_on_close = raise_on_close
+          @closed = false
+        end
+
+        def connection_open? = !@closed
+
+        def close
+          @closed = true
+          raise "cleanup failed" if @raise_on_close
+        end
+      end
+      first = resource_class.new(raise_on_close: true)
+      second = resource_class.new
+      client = described_class.new(token)
+      client.track_connection(first)
+      client.track_connection(second)
+
+      expect(client.open_connection_count).to eq(2)
+      expect { client.close }.not_to raise_error
+      expect(first.closed).to be true
+      expect(second.closed).to be true
+      expect(client.open_connection_count).to eq(0)
+      expect { client.track_connection(resource_class.new) }
+        .to raise_error(Sprites::Error, "client is closed")
+    end
+
     it "fences owned HTTP requests and reports all local connections closed" do
       client = described_class.new(token, base_url: "http://localhost:8080")
       client.close
@@ -42,6 +73,18 @@ RSpec.describe Sprites::Client do
       uri = URI("http://localhost:8080/v1/sprites")
       expect { client.request(uri, Net::HTTP::Get.new(uri)) }
         .to raise_error(Sprites::Error, "client is closed")
+    end
+
+    it "still closes resources and HTTP transport when a control pool cleanup fails" do
+      resource = instance_double("resource", close: true, connection_open?: true)
+      client = described_class.new(token, base_url: "http://localhost:8080")
+      pool = client.get_or_create_pool("demo")
+      allow(pool).to receive(:close).and_raise("cleanup failed")
+      client.track_connection(resource)
+
+      expect { client.close }.not_to raise_error
+      expect(resource).to have_received(:close)
+      expect(client.instance_variable_get(:@http_transport)).to be_closed
     end
   end
 

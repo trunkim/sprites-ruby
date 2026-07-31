@@ -22,6 +22,30 @@ RSpec.describe Sprites::ControlConn do
     conn.instance_variable_get(:@read_queue) << [:binary, "abc"]
     expect(conn.read_message(timeout: 0.2)).to eq([:binary, "abc"])
   end
+
+  it "wakes a busy reader when the remote WebSocket ends naturally" do
+    allow(ws).to receive(:read_message).and_return(nil)
+    conn.busy = true
+    conn.start_read_loop
+
+    expect(conn.read_message(timeout: 1)).to be_nil
+    expect(conn).to be_closed
+  ensure
+    conn.close
+  end
+
+  it "closes the Queue before joining so a blocked consumer is released" do
+    reader = Thread.new { conn.read_message }
+
+    conn.close
+
+    expect(reader.value).to be_nil
+  end
+
+  it "uses Ruby 4 Queue timeout semantics and validates the timeout" do
+    expect(conn.read_message(timeout: 0.001)).to be_nil
+    expect { conn.read_message(timeout: -1) }.to raise_error(ArgumentError, /timeout/)
+  end
 end
 
 RSpec.describe Sprites::ControlPool do
@@ -86,6 +110,23 @@ RSpec.describe Sprites::ControlPool do
     end
 
     expect(pool.size).to eq(1)
+  end
+
+  it "closes drained connections outside the pool mutex" do
+    pool = described_class.new(client, "demo", max_size: 1, drain_threshold: 0, drain_target: 0)
+    conn = instance_double(
+      Sprites::ControlConn,
+      :busy= => false,
+      :last_used= => Time.now,
+      busy?: false,
+      closed?: false,
+      last_used: Time.now
+    )
+    mutex = pool.instance_variable_get(:@mutex)
+    expect(conn).to receive(:close) { expect(mutex).not_to be_owned }
+
+    pool.offer_idle(conn)
+    expect(pool.size).to eq(0)
   end
 
   it "checkout after close raises" do

@@ -63,7 +63,14 @@ module Sprites
     end
 
     def mkdir(name, mode: 0o755, recursive: true)
-      write_file("#{name}/.keep", "", mode: mode, mkdir_parents: recursive)
+      keep_path = name.to_s.end_with?("/") ? "#{name}.keep" : "#{name}/.keep"
+      write_file(keep_path, "", mode: mode, mkdir_parents: recursive)
+      begin
+        remove(keep_path)
+      rescue StandardError
+        # 目录已经创建成功；清理占位文件失败不应把 mkdir 误报为失败。
+        nil
+      end
     end
 
     def mkdir_all(name, mode: 0o755)

@@ -4,12 +4,16 @@ require "spec_helper"
 require "socket"
 
 RSpec.describe Sprites::WebSocketConnection do
-  def connect_pair(valid_accept: true, extra_headers: {})
+  def connect_pair(valid_accept: true, extra_headers: {}, url: nil, request_sink: nil)
     client_socket, server_socket = Socket.pair(:UNIX, :STREAM, 0)
-    connection = described_class.new("ws://example.test/v1/sprites/demo/exec", timeout: 1)
+    connection = described_class.new(
+      url || "ws://example.test/v1/sprites/demo/exec",
+      timeout: 1
+    )
     allow(connection).to receive(:create_socket).and_return(client_socket)
     server_thread = Thread.new do
       request = read_headers(server_socket)
+      request_sink << request if request_sink
       key = request[/^Sec-WebSocket-Key:\s*(.+)\r$/i, 1]
       accept = Base64.strict_encode64(
         Digest::SHA1.digest("#{key}#{described_class::WEBSOCKET_GUID}")
@@ -94,6 +98,25 @@ RSpec.describe Sprites::WebSocketConnection do
       .to raise_error(Sprites::Error, /invalid Sec-WebSocket-Accept/)
   end
 
+  it "includes a non-default port in Host and rejects header injection or reserved overrides" do
+    requests = Queue.new
+    connection, server = connect_pair(
+      url: "ws://example.test:8443/v1/sprites/demo/exec",
+      request_sink: requests
+    )
+
+    expect(requests.pop).to include("Host: example.test:8443\r\n")
+    expect {
+      described_class.new("ws://example.test", headers: { "X-Test" => "ok\r\nInjected: yes" })
+    }.to raise_error(ArgumentError, /header value/)
+    expect {
+      described_class.new("ws://example.test", headers: { "Host" => "other.test" })
+    }.to raise_error(ArgumentError, /reserved/)
+  ensure
+    connection&.close
+    server&.close
+  end
+
   it "sends a masked close frame before closing the socket" do
     connection, server = connect_pair
 
@@ -136,6 +159,23 @@ RSpec.describe Sprites::WebSocketConnection do
       )
     )
     expect { connection.read_message }.to raise_error(Sprites::Error, /exceeds/)
+  ensure
+    connection&.close
+    server&.close
+  end
+
+  it "validates close payloads and can close safely before connect" do
+    expect { described_class.new("ws://example.test").close }.not_to raise_error
+
+    connection, server = connect_pair
+    expect { connection.write_close(1005) }.to raise_error(ArgumentError, /close code/)
+    expect { connection.write_close(1000, "x" * 124) }
+      .to raise_error(ArgumentError, /exceeds/)
+
+    server.write(server_frame(0x08, "\x00".b))
+    expect { connection.read_message }
+      .to raise_error(Sprites::Error, /close payload length/)
+    expect(connection).to be_closed
   ensure
     connection&.close
     server&.close

@@ -32,11 +32,20 @@ module Sprites
       cmd
     end
 
-    # HTTP kill：向 session 发送信号（默认 TERM）。WebSocket 信号不可用时的公共入口。
-    def kill_session(sprite_name, session_id, signal: "TERM")
+    # HTTP kill：发送信号并返回官方 NDJSON progress stream。
+    def kill_session(sprite_name, session_id, signal: "TERM", timeout: nil)
       raise ArgumentError, "session_id is required" if session_id.nil? || session_id.to_s.empty?
 
-      signal_session(sprite_name, session_id, signal)
+      params = {}
+      params[:signal] = signal if signal && !signal.to_s.empty?
+      params[:timeout] = timeout if timeout && !timeout.to_s.empty?
+      response = http_post_stream(
+        Routes.session_kill(sprite_name, session_id),
+        nil,
+        params: params,
+        json: false
+      )
+      SessionKillStream.new(parse_stream_response!(response))
     end
   end
 
@@ -49,8 +58,8 @@ module Sprites
       client.attach_session(name, session_id, org: org, tty: tty)
     end
 
-    def kill_session(session_id, signal: "TERM")
-      client.kill_session(name, session_id, signal: signal)
+    def kill_session(session_id, signal: "TERM", timeout: nil)
+      client.kill_session(name, session_id, signal:, timeout:)
     end
   end
 end

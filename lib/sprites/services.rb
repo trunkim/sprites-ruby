@@ -78,6 +78,8 @@ module Sprites
       ServiceStream.new(parse_stream_response!(resp))
     end
 
+    alias get_service_logs service_logs
+
     def signal_service(sprite_name, service_name, signal)
       body = { name: service_name, signal: signal }
       resp = http_post("#{Routes.services(sprite_name)}/signal", body)
@@ -118,6 +120,8 @@ module Sprites
     def service_logs(service_name, lines: nil, duration: nil)
       client.service_logs(name, service_name, lines: lines, duration: duration)
     end
+
+    alias get_service_logs service_logs
 
     def signal_service(service_name, signal)
       client.signal_service(name, service_name, signal)

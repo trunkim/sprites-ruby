@@ -6,7 +6,7 @@ RSpec.describe Sprites::Management do
   let(:client) { Sprites::Client.new("test-token", base_url: "http://localhost:8080") }
 
   describe "#create_sprite" do
-    it "creates a sprite with wait_for_capacity by default" do
+    it "creates a sprite with wait_for_capacity when explicitly requested" do
       stub_request(:post, "http://localhost:8080/v1/sprites")
         .with(
           headers: { "Authorization" => "Bearer test-token", "Content-Type" => "application/json" },
@@ -18,7 +18,7 @@ RSpec.describe Sprites::Management do
           headers: { "Content-Type" => "application/json" }
         )
 
-      sprite = client.create_sprite("my-sprite")
+      sprite = client.create_sprite("my-sprite", wait_for_capacity: true)
       expect(sprite).to be_a(Sprites::Sprite)
       expect(sprite.name).to eq("my-sprite")
       expect(sprite.status).to eq("created")

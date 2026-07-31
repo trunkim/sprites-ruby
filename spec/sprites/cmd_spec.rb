@@ -3,6 +3,38 @@
 require "spec_helper"
 
 RSpec.describe Sprites::Cmd do
+  class BlockingCommandConnection
+    attr_reader :capabilities
+
+    def initialize
+      @messages = Queue.new
+      @capabilities = {}
+      @closed = false
+      @mutex = Mutex.new
+    end
+
+    def connect! = self
+    def write_binary(_payload) = nil
+    def write_text(_payload) = nil
+    def read_message = @messages.pop
+
+    def emit(message)
+      @messages << message
+    end
+
+    def close
+      should_wake = @mutex.synchronize do
+        next false if @closed
+
+        @closed = true
+        true
+      end
+      @messages << nil if should_wake
+    end
+
+    def closed? = @mutex.synchronize { @closed }
+  end
+
   let(:client) do
     instance_double(
       Sprites::Client,
@@ -42,6 +74,24 @@ RSpec.describe Sprites::Cmd do
       params = URI.decode_www_form(URI.parse(url).query)
 
       expect(params.map(&:first)).not_to include("max_run_after_disconnect")
+    end
+  end
+
+  describe "detachable sessions" do
+    it "writes detachable on direct and control protocols" do
+      cmd = sprite.create_session("bash", "-l")
+      params = URI.decode_www_form(URI.parse(cmd.send(:build_websocket_url)).query)
+      expect(params).to include(["tty", "true"], ["detachable", "true"])
+
+      ws = Sprites::WsCmd.new(url: "wss://example/exec", headers: {}, name: "bash")
+      ws.detachable = true
+      conn = instance_double(Sprites::WebSocketConnection, write_text: nil)
+      ws.instance_variable_set(:@conn, conn)
+      ws.send(:send_control_start)
+
+      expect(conn).to have_received(:write_text) do |payload|
+        expect(JSON.parse(payload.delete_prefix("control:")).dig("args", "detachable")).to eq("true")
+      end
     end
   end
 
@@ -129,6 +179,95 @@ RSpec.describe Sprites::Cmd do
       ws_cmd.disconnect
 
       expect(control_conn).to have_received(:close)
+    end
+  end
+
+
+  describe "WsCmd thread lifecycle" do
+    it "cannot be started after its Client-owned transport was closed" do
+      ws = Sprites::WsCmd.new(url: "wss://example/exec", headers: {}, name: "true")
+      ws.close
+
+      expect { ws.start }.to raise_error(Sprites::Error, /closed/)
+    end
+
+    it "sends stdin EOF synchronously when there is no stdin" do
+      ws = Sprites::WsCmd.new(url: "wss://example/exec", headers: {}, name: "true")
+      adapter = instance_double(Sprites::WsAdapter, write_stream: nil, close: nil)
+      conn = instance_double(Sprites::WebSocketConnection, read_message: [:close, ""])
+      ws.instance_variable_set(:@adapter, adapter)
+      ws.instance_variable_set(:@conn, conn)
+
+      ws.send(:run_io)
+
+      expect(adapter).to have_received(:write_stream).with(Sprites::STREAM_STDIN_EOF, "").once
+      expect(ws.instance_variable_get(:@stdin_thread)).to be_nil
+    end
+
+    it "terminates its own blocked stdin forwarding thread after remote completion" do
+      reader, writer = IO.pipe
+      ws = Sprites::WsCmd.new(url: "wss://example/exec", headers: {}, name: "cat")
+      ws.stdin = reader
+      adapter = instance_double(Sprites::WsAdapter, closed?: false, close: nil)
+      conn = instance_double(Sprites::WebSocketConnection, read_message: [:close, ""])
+      ws.instance_variable_set(:@adapter, adapter)
+      ws.instance_variable_set(:@conn, conn)
+
+      ws.send(:run_io)
+
+      expect(ws.instance_variable_get(:@stdin_thread)).to be_nil
+    ensure
+      reader&.close
+      writer&.close
+    end
+
+    it "preserves an I/O failure that happens after start succeeds" do
+      ws = Sprites::WsCmd.new(url: "wss://example/exec", headers: {}, name: "true")
+      conn = instance_double(
+        Sprites::WebSocketConnection,
+        capabilities: {},
+        write_binary: nil,
+        close: nil
+      )
+      allow(conn).to receive(:read_message).and_raise(IOError, "broken socket")
+      allow(ws).to receive(:connect_websocket) { ws.instance_variable_set(:@conn, conn) }
+
+      ws.start
+      ws.wait
+
+      expect(ws.operation_error).to be_a(Sprites::Error)
+      expect(ws.operation_error.message).to eq("broken socket")
+    end
+  end
+
+  describe "parallel direct command isolation" do
+    it "disconnects one blocked command without closing its sibling connection" do
+      real_client = Sprites::Client.new(
+        "token",
+        base_url: "https://example.test",
+        disable_control: true
+      )
+      first_connection = BlockingCommandConnection.new
+      second_connection = BlockingCommandConnection.new
+      allow(Sprites::WebSocketConnection).to receive(:new)
+        .and_return(first_connection, second_connection)
+      first = real_client.sprite("demo").command("sleep", "60")
+      second = real_client.sprite("demo").command("sleep", "60")
+
+      first.start
+      second.start
+      expect(real_client.open_connection_count).to eq(2)
+
+      first.disconnect
+      expect(first.wait).to be_a(Sprites::Error)
+      expect(second_connection).not_to be_closed
+      expect(real_client.open_connection_count).to eq(1)
+
+      second_connection.emit([:binary, [Sprites::STREAM_EXIT, 0].pack("CC")])
+      expect(second.wait).to be_nil
+      expect(real_client.open_connection_count).to eq(0)
+    ensure
+      real_client&.close
     end
   end
 end

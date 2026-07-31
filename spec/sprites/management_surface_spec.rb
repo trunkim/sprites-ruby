@@ -53,6 +53,17 @@ RSpec.describe "Sprites management public surface" do
     expect(sprite.url_settings.private_access).to eq("admins")
   end
 
+  it "omits optional capacity waiting when the caller does not request it" do
+    stub_request(:post, "http://localhost:8080/v1/sprites")
+      .to_return(status: 201, body: JSON.generate(sprite_payload))
+
+    client.create_sprite("demo/name")
+
+    expect(a_request(:post, "http://localhost:8080/v1/sprites").with { |wire|
+      JSON.parse(wire.body) == { "name" => "demo/name" }
+    }).to have_been_made.once
+  end
+
   it "encodes names and preserves list counts, bulk_load, update, restart, and check" do
     stub_request(:get, "http://localhost:8080/v1/sprites/demo%2Fname")
       .to_return(status: 200, body: JSON.generate(sprite_payload))

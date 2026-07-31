@@ -45,12 +45,22 @@ module Sprites
 
     # 启动后台读取线程
     def start_read_loop
-      @read_thread = Thread.new { read_loop }
+      @mutex.synchronize do
+        raise Error, "control connection is closed" if @closed
+        return self if @read_thread
+
+        @read_thread = Thread.new { read_loop }
+        @read_thread.report_on_exception = false
+      end
+      self
     end
 
     # 清空消息队列（checkout 时调用，防止残留消息干扰新命令）
     def drain_queue
-      loop { @read_queue.pop(true) }
+      loop do
+        break if @read_queue.empty?
+        break if @read_queue.pop(true).nil?
+      end
     rescue ThreadError
       # 队列已空
     end
@@ -59,43 +69,42 @@ module Sprites
     # @param timeout [Float, nil] 超时秒数，nil 表示阻塞等待
     # @return [Array, nil] [:text/:binary, data] 或 nil
     def read_message(timeout: nil)
-      if timeout && timeout > 0
-        # 带超时的轮询读取
-        deadline = Time.now + timeout
-        loop do
-          remaining = deadline - Time.now
-          return nil if remaining <= 0
+      return @read_queue.pop if timeout.nil?
 
-          begin
-            return @read_queue.pop(true)  # 非阻塞尝试
-          rescue ThreadError
-            sleep(0.01)
-          end
-        end
-      else
-        # 阻塞读取（false = blocking）
-        @read_queue.pop(false)
-      end
-    rescue ThreadError
+      timeout = Float(timeout)
+      raise ArgumentError, "timeout must be >= 0" if timeout.negative? || !timeout.finite?
+
+      @read_queue.pop(timeout: timeout)
+    rescue ThreadError, ClosedQueueError
       nil
     end
 
     # 发送释放消息，通知服务端此连接可复用
     def close
-      return if @closed
+      thread = @mutex.synchronize do
+        return if @closed
 
-      @closed = true
-      @ws&.close rescue nil
-      if @read_thread
-        joined = @read_thread.join(2)
-        @read_thread.kill if joined.nil? && @read_thread.alive?
+        @closed = true
+        @read_thread
       end
-      # 解除可能阻塞在 Queue#pop 上的读者
-      @read_queue << nil rescue nil
+      @read_queue.close
+      begin
+        @ws&.close
+      rescue StandardError
+        nil
+      end
+      if thread&.alive? && !thread.equal?(Thread.current)
+        thread.join(2)
+        if thread.alive?
+          thread.kill
+          thread.join
+        end
+      end
+      nil
     end
 
     def closed?
-      @closed
+      @mutex.synchronize { @closed }
     end
 
     private
@@ -129,7 +138,8 @@ module Sprites
     rescue => e
       Sprites.dbg("sprites: control read_loop error", error: e.message)
     ensure
-      @closed = true
+      @mutex.synchronize { @closed = true }
+      @read_queue.close
     end
   end
 
@@ -172,17 +182,21 @@ module Sprites
     def offer_idle(conn)
       return unless conn
 
-      @mutex.synchronize do
+      close_now = false
+      to_close = @mutex.synchronize do
         if @closed
-          conn.close
-          return
+          close_now = true
+          []
+        else
+          conn.busy = false
+          conn.last_used = Time.now
+          @conns << conn unless @conns.include?(conn)
+          take_drain_candidates
         end
-
-        conn.busy = false
-        conn.last_used = Time.now
-        @conns << conn unless @conns.include?(conn)
-        try_drain
       end
+      conn.close if close_now
+      close_drained(to_close)
+      nil
     end
 
     # 获取一个可用连接（优先复用空闲连接，否则新建）
@@ -232,7 +246,7 @@ module Sprites
         Sprites.dbg("sprites: dialed new control conn", sprite: @sprite_name, pool: @conns.size)
       end
       conn
-    rescue => e
+    rescue
       @mutex.synchronize { @pending_dials -= 1 } if conn.nil?
       raise
     end
@@ -245,21 +259,28 @@ module Sprites
       conn.last_used = Time.now
       Sprites.dbg("sprites: checkin control conn", sprite: @sprite_name)
 
-      @mutex.synchronize { try_drain }
+      to_close = @mutex.synchronize { take_drain_candidates }
+      close_drained(to_close)
+      nil
     end
 
     # 关闭池中所有连接
     def close
-      @mutex.synchronize do
+      connections = @mutex.synchronize do
+        return if @closed
+
         @closed = true
-        @conns.each(&:close)
+        snapshot = @conns.dup
         @conns.clear
+        snapshot
       end
+      connections.each(&:close)
+      nil
     end
 
     # 新建一个控制连接
     # @return [ControlConn]
-    def dial(ctx = nil)
+    def dial(_ctx = nil)
       url = build_control_url
 
       headers = {
@@ -285,21 +306,24 @@ module Sprites
     private
 
     # 当连接数超过阈值时，关闭最久未使用的空闲连接（LRU）
-    def try_drain
-      return if @closed || @conns.size <= @drain_threshold
+    def take_drain_candidates
+      return [] if @closed || @conns.size <= @drain_threshold
 
       idles = @conns.select { |c| !c.busy? && !c.closed? }
                      .sort_by(&:last_used)
 
       to_close = @conns.size - @drain_target
-      return if to_close <= 0 || idles.empty?
+      return [] if to_close <= 0 || idles.empty?
 
       to_close = [to_close, idles.size].min
       close_set = idles.first(to_close)
+      @conns.reject! { |conn| close_set.include?(conn) }
+      close_set
+    end
 
+    def close_drained(close_set)
       close_set.each(&:close)
-      @conns.reject! { |c| close_set.include?(c) }
-      Sprites.dbg("sprites: drained control pool", sprite: @sprite_name, pool_size: @conns.size)
+      Sprites.dbg("sprites: drained control pool", sprite: @sprite_name, pool_size: size) unless close_set.empty?
     end
   end
 end

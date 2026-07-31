@@ -46,6 +46,10 @@ RSpec.describe Sprites::SpriteFS do
       :put,
       "#{base}/write?mkdirParents=true&mode=0755&path=nested%2Fpath%2F.keep&workingDir=%2Fapp"
     ).to_return(status: 200)
+    stub_request(
+      :delete,
+      "#{base}/delete?path=nested%2Fpath%2F.keep&workingDir=%2Fapp"
+    ).to_return(status: 204)
     stub_request(:delete, %r{#{Regexp.escape(base)}/delete\?.*path=old})
       .to_return(status: 204)
     stub_request(:post, "#{base}/rename").to_return(status: 200)
@@ -66,6 +70,10 @@ RSpec.describe Sprites::SpriteFS do
     expect(entry.mode_value).to eq(0o644)
     expect(filesystem.exists?("file.txt")).to be true
     filesystem.mkdir("nested/path", recursive: true)
+    expect(a_request(
+      :delete,
+      "#{base}/delete?path=nested%2Fpath%2F.keep&workingDir=%2Fapp"
+    )).to have_been_made.once
     filesystem.remove("old", recursive: true, as_root: true)
     filesystem.rename("old", "new", as_root: true)
     filesystem.copy("source", "dest", recursive: true, preserve_attrs: true, as_root: true)

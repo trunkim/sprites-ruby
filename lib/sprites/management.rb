@@ -12,9 +12,9 @@ require "net/http"
 
 module Sprites
   module Management
-    # @param wait_for_capacity [Boolean] 官方 create body 字段；默认 true
+    # @param wait_for_capacity [Boolean, nil] 官方 create body 字段；nil 时不发送
     def create_sprite(name, config: nil, environment: nil, url_settings: nil,
-                      org: nil, labels: nil, wait_for_capacity: true, runtime: nil)
+                      org: nil, labels: nil, wait_for_capacity: nil, runtime: nil)
       body = { name: name }
       body[:config] = config.to_h if config
       body[:environment] = environment if environment
@@ -23,7 +23,7 @@ module Sprites
       body[:wait_for_capacity] = wait_for_capacity unless wait_for_capacity.nil?
       body[:runtime] = runtime if runtime
 
-      resp = http_post(Routes.sprites, body)
+      resp = http_post(Routes.sprites, body, read_timeout: 120, open_timeout: 120)
       data = parse_response!(resp, expected: [200, 201])
       data["name"] ||= name
 
@@ -143,14 +143,24 @@ module Sprites
     alias destroy_sprite delete_sprite
 
     def upgrade_sprite(name)
-      resp = http_post("#{Routes.sprite(name)}/upgrade", nil)
+      resp = http_post(
+        "#{Routes.sprite(name)}/upgrade",
+        nil,
+        read_timeout: 60,
+        open_timeout: 60
+      )
       return if [200, 204].include?(resp.code.to_i)
 
       parse_response!(resp)
     end
 
     def restart_sprite(name)
-      resp = http_post("#{Routes.sprite(name)}/restart", nil)
+      resp = http_post(
+        "#{Routes.sprite(name)}/restart",
+        nil,
+        read_timeout: 60,
+        open_timeout: 60
+      )
       RestartSpriteResult.from_hash(parse_response!(resp, expected: [200, 202]))
     end
 

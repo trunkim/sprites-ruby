@@ -23,6 +23,19 @@ module Sprites
     end
   end
 
+  # 收集式 exec 的非零退出错误；保留 stdout/stderr，便于调用方诊断。
+  class ExecError < ExitError
+    attr_reader :result
+
+    def initialize(result)
+      @result = result
+      super(result.exit_code)
+    end
+
+    def stdout = result.stdout
+    def stderr = result.stderr
+  end
+
   # 在 Wait 之前未调用 Start 时抛出
   class NotStartedError < Error
     def initialize

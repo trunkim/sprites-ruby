@@ -17,7 +17,8 @@ module Sprites
   class WsCmd
     attr_accessor :path, :args, :stdin, :stdout, :stderr, :env, :dir,
                   :tty, :is_attach, :attach_session_id, :max_run_after_disconnect,
-                  :text_message_handler, :existing_conn, :using_control, :control_conn
+                  :text_message_handler, :existing_conn, :using_control, :control_conn,
+                  :detachable, :on_release
     attr_reader :session_id, :capabilities, :operation_error
 
     def initialize(url:, headers:, name:, args: [], ctx: nil)
@@ -30,6 +31,7 @@ module Sprites
       @is_attach = false
       @attach_session_id = nil
       @max_run_after_disconnect = nil
+      @detachable = false
       @text_message_handler = nil
       @existing_conn = nil      # 复用已有的 WebSocket（控制连接）
       @using_control = false     # 是否使用控制连接协议
@@ -37,14 +39,20 @@ module Sprites
       @conn = nil                # 底层 WebSocketConnection
       @adapter = nil             # WsAdapter 写入适配器
       @start_queue = Queue.new   # 同步 start：成功放 nil，失败放 Exception
+      @start_notified = false
+      @stdin_thread = nil
       @exit_code = nil
       @received_exit = false
       @done = false
       @done_mutex = Mutex.new
       @done_cond = ConditionVariable.new
+      @lifecycle_mutex = Mutex.new
+      @started = false
+      @closed = false
       @session_id = nil
       @capabilities = {}
       @operation_error = nil
+      @on_release = nil
       @env = nil
       @dir = nil
     end
@@ -52,7 +60,13 @@ module Sprites
     # 异步启动：在新线程中建立连接并开始 I/O 循环
     # 阻塞等待连接建立成功或失败
     def start
-      @io_thread = Thread.new { run_start }
+      @lifecycle_mutex.synchronize do
+        raise Error, "command transport is closed" if @closed
+        raise AlreadyStartedError if @started
+
+        @started = true
+        @io_thread = Thread.new { run_start }
+      end
       err = @start_queue.pop
       raise err if err.is_a?(Exception)
     end
@@ -101,10 +115,39 @@ module Sprites
     def disconnect
       if @using_control && @control_conn
         @control_conn.close
+      elsif @adapter
+        @adapter.close
       else
-        @adapter&.close || @conn&.close
+        @conn&.close
       end
       nil
+    end
+
+    def close
+      thread = @lifecycle_mutex.synchronize do
+        return if @closed
+
+        @closed = true
+        @io_thread
+      end
+      disconnect
+      return unless thread&.alive? && !thread.equal?(Thread.current)
+
+      thread.join(1)
+      return unless thread.alive?
+
+      thread.kill
+      thread.join
+      nil
+    rescue IOError, SystemCallError, OpenSSL::SSL::SSLError
+      nil
+    end
+
+    # Client/diagnostics 只读本地 direct WebSocket 状态；control connection 由 pool 计数。
+    def connection_open?
+      return false if @using_control || done?
+
+      @conn && !@conn.closed?
     end
 
     private
@@ -112,6 +155,8 @@ module Sprites
     # ── 连接建立与 I/O 循环主流程 ──
 
     def run_start
+      raise Error, "command transport is closed" if transport_closed?
+
       if @existing_conn
         # 控制连接模式：复用已有 WebSocket
         @conn = @existing_conn
@@ -120,6 +165,7 @@ module Sprites
         # 直接模式：新建 WebSocket
         connect_websocket
       end
+      raise Error, "command transport is closed" if transport_closed?
 
       if @conn.respond_to?(:capabilities)
         @capabilities = @conn.capabilities
@@ -131,16 +177,19 @@ module Sprites
       end
 
       @adapter = WsAdapter.new(@conn, @tty)
-      @start_queue << nil  # 通知 start 方法连接已建立
+      notify_start(nil)
       run_io
     rescue => e
-      @start_queue << e
+      @operation_error ||= e.is_a?(Error) ? e : Error.new(e.message)
+      notify_start(e)
+      disconnect rescue nil
       mark_done
     ensure
+      notify_start(Error.new("command transport is closed")) unless @start_notified
       # 控制连接模式下，消费可能残留的操作完成消息
       if @using_control && @control_conn
         begin
-          msg = @control_conn.read_message(timeout: 0.1)
+          @control_conn.read_message(timeout: 0.1)
         rescue
           # ignore
         end
@@ -169,6 +218,7 @@ module Sprites
       args["dir"] = @dir if @dir && !@dir.empty?
       args["tty"] = "true" if @tty
       args["stdin"] = "true" if @stdin
+      args["detachable"] = "true" if @detachable
       args["id"] = @attach_session_id if @attach_session_id
       unless @max_run_after_disconnect.nil?
         args["max_run_after_disconnect"] = @max_run_after_disconnect.to_s
@@ -228,6 +278,8 @@ module Sprites
         run_stream_io
       end
     ensure
+      close_adapter
+      stop_stdin_writer
       mark_done
     end
 
@@ -235,7 +287,7 @@ module Sprites
     def start_stdin_writer
       return unless @stdin
 
-      Thread.new do
+      @stdin_thread = Thread.new do
         if @tty
           # PTY 模式：直接转发原始字节
           buf = String.new(capacity: 32768)
@@ -275,6 +327,7 @@ module Sprites
       rescue => e
         Sprites.dbg("sprites: stdin writer error", error: e.message)
       end
+      @stdin_thread.report_on_exception = false
     end
 
     # PTY 模式 I/O 循环：二进制帧直接写 stdout
@@ -329,10 +382,8 @@ module Sprites
       err_out = @stderr || $stderr
 
       # 没有 stdin 时立即发送 EOF（直接连接模式）
-      unless @stdin
-        unless @using_control && @control_conn
-          Thread.new { @adapter.write_stream(STREAM_STDIN_EOF, "") }
-        end
+      if !@stdin && !(@using_control && @control_conn)
+        @adapter.write_stream(STREAM_STDIN_EOF, "")
       end
 
       loop do
@@ -433,10 +484,40 @@ module Sprites
     end
 
     def mark_done
-      @done_mutex.synchronize do
+      release = @done_mutex.synchronize do
+        return if @done
+
         @done = true
         @done_cond.broadcast
+        @on_release
       end
+      release&.call
+    end
+
+    def notify_start(result)
+      return if @start_notified
+
+      @start_notified = true
+      @start_queue << result
+    end
+
+    # 调用方 stdin 可能是永不 EOF 的 pipe。远端结束后先给 writer 一个短暂退出窗口，
+    # 再终止仅由本 WsCmd 创建的转发 thread，避免每次命令泄漏一条阻塞线程。
+    def stop_stdin_writer
+      thread = @stdin_thread
+      return unless thread && !thread.equal?(Thread.current)
+
+      thread.join(0.1)
+      return unless thread.alive?
+
+      thread.kill
+      thread.join
+    ensure
+      @stdin_thread = nil
+    end
+
+    def transport_closed?
+      @lifecycle_mutex.synchronize { @closed }
     end
   end
 end

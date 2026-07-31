@@ -10,9 +10,9 @@ Gem::Specification.new do |spec|
   spec.description = "An idiomatic Ruby SDK for working with sprites. Execute commands on remote Sprites as if they were local."
   spec.homepage = "https://github.com/trunkim/sprites-ruby"
   spec.license = "MIT"
-  spec.required_ruby_version = ">= 3.1"
+  spec.required_ruby_version = ">= 4.0"
 
-  spec.files = Dir["lib/**/*", "LICENSE", "README.md"]
+  spec.files = Dir["lib/**/*", "docs/**/*", "LICENSE", "README.md"]
   spec.require_paths = ["lib"]
 
   spec.add_dependency "logger"

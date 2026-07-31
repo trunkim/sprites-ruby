@@ -67,15 +67,27 @@ RSpec.describe Sprites::Sessions do
   end
 
   describe "#kill_session" do
-    it "posts kill with signal" do
-      stub_request(:post, "http://localhost:8080/v1/sprites/demo/exec/42/kill?signal=TERM&timeout=0s")
-        .to_return(status: 200)
+    it "posts kill with signal and timeout and maps progress incrementally" do
+      request = stub_request(
+        :post,
+        "http://localhost:8080/v1/sprites/demo/exec/42/kill?signal=TERM&timeout=5s"
+      ).with { |wire| wire.headers["Content-Type"].nil? }
+        .to_return(
+          status: 200,
+          body: "{\"type\":\"signal\",\"pid\":2}\n{\"type\":\"complete\",\"exit_code\":0}\n"
+        )
 
-      expect { client.kill_session("demo", "42") }.not_to raise_error
+      stream = client.kill_session("demo", "42", timeout: "5s")
+
+      expect(stream.next_event.pid).to eq(2)
+      expect(stream.next_event.exit_code).to eq(0)
+      expect(request).to have_been_requested
+    ensure
+      stream&.close
     end
 
     it "raises typed APIError on failure" do
-      stub_request(:post, "http://localhost:8080/v1/sprites/demo/exec/42/kill?signal=KILL&timeout=0s")
+      stub_request(:post, "http://localhost:8080/v1/sprites/demo/exec/42/kill?signal=KILL")
         .to_return(
           status: 404,
           body: JSON.generate({ error: "not_found", message: "session gone" }),

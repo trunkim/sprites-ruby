@@ -103,13 +103,22 @@ module Sprites
     MAX_HANDSHAKE_LINE_BYTES = 8 * 1024
     MAX_HANDSHAKE_BYTES = 64 * 1024
     MAX_FRAME_PAYLOAD_BYTES = 16 * 1024 * 1024
+    RESERVED_REQUEST_HEADERS = %w[
+      host upgrade connection sec-websocket-key sec-websocket-version sec-websocket-accept
+    ].freeze
 
     attr_reader :socket, :capabilities, :response_headers
 
     def initialize(uri, headers: {}, timeout: 30)
       @uri = URI(uri)
-      @headers = headers
-      @timeout = timeout
+      unless %w[ws wss].include?(@uri.scheme) && @uri.host
+        raise ArgumentError, "WebSocket URI must use ws or wss and include a host"
+      end
+
+      @headers = headers.to_h
+      validate_request_headers!
+      @timeout = Float(timeout)
+      raise ArgumentError, "timeout must be > 0" unless @timeout.positive? && @timeout.finite?
       @read_mutex = Mutex.new
       @write_mutex = Mutex.new
       @state_mutex = Mutex.new
@@ -121,6 +130,11 @@ module Sprites
     # 建立 TCP/SSL 连接并完成 WebSocket 握手
     # @return [self]
     def connect!
+      @state_mutex.synchronize do
+        raise Error, "WebSocket connection is closed" if @closed
+        raise Error, "WebSocket connection already started" if @socket
+      end
+
       @socket = create_socket
       perform_handshake
       parse_capabilities
@@ -147,8 +161,10 @@ module Sprites
 
     # 发送关闭帧（opcode 0x08）
     def write_close(code = 1000, reason = "")
-      payload = [code].pack("n") + reason.encode("utf-8")
-      write_frame(0x08, payload) rescue nil
+      payload = build_close_payload(code, reason)
+      write_frame(0x08, payload)
+    rescue IOError, SystemCallError, OpenSSL::SSL::SSLError
+      nil
     end
 
     # 读取下一条消息
@@ -167,7 +183,7 @@ module Sprites
         return if closed?
 
         begin
-          write_frame_unlocked(0x08, [1000].pack("n"))
+          write_frame_unlocked(0x08, [1000].pack("n")) if @socket && !@socket.closed?
         rescue IOError, SystemCallError, OpenSSL::SSL::SSLError
           nil
         ensure
@@ -215,7 +231,7 @@ module Sprites
       path = @uri.request_uri
 
       request = "GET #{path} HTTP/1.1\r\n"
-      request += "Host: #{@uri.host}\r\n"
+      request += "Host: #{host_header}\r\n"
       request += "Upgrade: websocket\r\n"
       request += "Connection: Upgrade\r\n"
       request += "Sec-WebSocket-Key: #{key}\r\n"
@@ -291,6 +307,8 @@ module Sprites
     def write_frame_unlocked(opcode, payload)
       payload = payload.b
       raise Error, "WebSocket frame exceeds #{MAX_FRAME_PAYLOAD_BYTES} bytes" if payload.bytesize > MAX_FRAME_PAYLOAD_BYTES
+      raise Error, "WebSocket control frame exceeds 125 bytes" if opcode >= 0x08 && payload.bytesize > 125
+      raise Error, "WebSocket is not connected" unless @socket
 
       frame = +[0x80 | opcode].pack("C")
       mask_key = SecureRandom.random_bytes(4)
@@ -326,6 +344,7 @@ module Sprites
 
           case opcode
           when 0x08
+            validate_received_close_payload!(payload)
             write_frame(0x08, payload) unless closed?
             mark_closed
             close_socket
@@ -364,9 +383,12 @@ module Sprites
         end
         return [:binary, message]
       end
-    rescue IOError, EOFError, Errno::ECONNRESET, OpenSSL::SSL::SSLError
+    rescue IOError, Errno::ECONNRESET, OpenSSL::SSL::SSLError
       mark_closed
       nil
+    rescue Sprites::Error
+      close_socket
+      raise
     end
 
     def read_frame_header
@@ -448,7 +470,7 @@ module Sprites
     end
 
     def wait_for_io(io, direction, deadline:, error_class: Net::ReadTimeout)
-      timeout = deadline && deadline - monotonic_now
+      timeout = deadline && (deadline - monotonic_now)
       raise error_class, "WebSocket I/O timed out" if timeout && timeout <= 0
 
       ready = direction == :read ? io.wait_readable(timeout) : io.wait_writable(timeout)
@@ -470,6 +492,53 @@ module Sprites
       difference = 0
       actual.bytes.zip(expected.bytes) { |left, right| difference |= left ^ right }
       difference.zero?
+    end
+
+    def validate_request_headers!
+      @headers.each do |name, value|
+        normalized = name.to_s.downcase
+        unless name.to_s.match?(/\A[!#$%&'*+\-.^_`|~0-9A-Za-z]+\z/)
+          raise ArgumentError, "invalid WebSocket request header name"
+        end
+        if RESERVED_REQUEST_HEADERS.include?(normalized)
+          raise ArgumentError, "reserved WebSocket request header: #{name}"
+        end
+        if value.to_s.match?(/[\r\n]/)
+          raise ArgumentError, "invalid WebSocket request header value"
+        end
+      end
+    end
+
+    def host_header
+      host = @uri.host
+      host = "[#{host}]" if host.include?(":") && !host.start_with?("[")
+      default_port = @uri.scheme == "wss" ? 443 : 80
+      @uri.port == default_port ? host : "#{host}:#{@uri.port}"
+    end
+
+    def build_close_payload(code, reason)
+      code = Integer(code)
+      reason = reason.to_s.encode(Encoding::UTF_8)
+      raise ArgumentError, "invalid WebSocket close code" unless valid_close_code?(code)
+      raise ArgumentError, "WebSocket close reason exceeds 123 bytes" if reason.bytesize > 123
+
+      [code].pack("n") + reason
+    end
+
+    def validate_received_close_payload!(payload)
+      raise Error, "invalid WebSocket close payload length" if payload.bytesize == 1
+      return if payload.empty?
+
+      code = payload.unpack1("n")
+      raise Error, "invalid WebSocket close code #{code}" unless valid_close_code?(code)
+
+      reason = payload.byteslice(2..).force_encoding(Encoding::UTF_8)
+      raise Error, "WebSocket close reason is not valid UTF-8" unless reason.valid_encoding?
+    end
+
+    def valid_close_code?(code)
+      (code.between?(1000, 1014) && ![1004, 1005, 1006].include?(code)) ||
+        code.between?(3000, 4999)
     end
 
     def mark_closed

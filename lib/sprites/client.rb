@@ -24,6 +24,8 @@ module Sprites
   #     disable_control: true)
   class Client
     include Management   # create/get/list/delete/upgrade sprites
+    include HTTPExec     # non-WebSocket exec
+    include Watch        # port/filesystem WebSocket watchers
     include Sessions     # list/attach sessions
     include Checkpoints  # create/list/get/restore checkpoints
     include Services     # CRUD services, start/stop/signal
@@ -51,11 +53,12 @@ module Sprites
     # @param token [String] Sprite API 认证 token
     # @param base_url [String] API 基础 URL（默认 https://api.sprites.dev）
     # @param http_client [Net::HTTP, #request] 可选注入的 HTTP transport；须能 request(req)
+    # @param timeout [Numeric] 普通 HTTP/WebSocket I/O 超时（秒）
     # @param control_init_timeout [Integer] 控制连接初始化超时（秒）
     # @param disable_control [Boolean] 禁用控制连接（强制使用直接 WebSocket）
     # @param max_http_connections [Integer] HTTP keep-alive 连接池上限（默认 8）
     # @param max_control_connections [Integer] 每 sprite control 池上限（默认 8，不再使用固定 100）
-    def initialize(token, base_url: "https://api.sprites.dev", http_client: nil,
+    def initialize(token, base_url: "https://api.sprites.dev", http_client: nil, timeout: 30,
                    control_init_timeout: 2, disable_control: false,
                    max_http_connections: DEFAULT_MAX_HTTP_CONNECTIONS,
                    max_control_connections: DEFAULT_MAX_CONTROL_CONNECTIONS,
@@ -63,7 +66,7 @@ module Sprites
                    control_drain_target: DEFAULT_CONTROL_DRAIN_TARGET)
       @token = token
       @base_url = base_url.chomp("/")
-      @http_timeout = 30
+      @http_timeout = Float(timeout)
       @control_init_timeout = control_init_timeout
       @disable_control = disable_control
       @max_http_connections = Integer(max_http_connections)
@@ -72,6 +75,7 @@ module Sprites
       @control_drain_target = Integer(control_drain_target)
       raise ArgumentError, "max_http_connections must be >= 1" if @max_http_connections < 1
       raise ArgumentError, "max_control_connections must be >= 1" if @max_control_connections < 1
+      raise ArgumentError, "timeout must be > 0" unless @http_timeout.positive? && @http_timeout.finite?
       raise ArgumentError, "control_drain_target must be >= 0" if @control_drain_target.negative?
       if @control_drain_threshold < @control_drain_target
         raise ArgumentError, "control_drain_threshold must be >= control_drain_target"
@@ -85,10 +89,10 @@ module Sprites
       @pools_mutex = Mutex.new
       @pools = {}
 
-      # checkpoint/service/watch 流各自持有独占 HTTP connection；Client#close
-      # 必须能统一取消未消费完的流。
-      @streams_mutex = Mutex.new
-      @streams = {}.compare_by_identity
+      # Client scope 内的 direct command、checkpoint/service/watch 连接。
+      # Client#close 必须能统一取消未消费/未完成的资源。
+      @resources_mutex = Mutex.new
+      @resources = {}.compare_by_identity
 
       @http_mutex = Mutex.new
       @owns_http_client = http_client.nil?
@@ -177,6 +181,22 @@ module Sprites
       raise Error, "signal failed (status #{resp.code}): #{resp.body&.strip}"
     end
 
+    # SDK 内部 connection registry；让 Client#close 能中断 active direct command
+    # 与长连接 stream。返回原对象，便于构造链调用。
+    def track_connection(resource)
+      @pools_mutex.synchronize do
+        raise Error, "client is closed" if @closed
+
+        @resources_mutex.synchronize { @resources[resource] = true }
+      end
+      resource
+    end
+
+    def untrack_connection(resource)
+      @resources_mutex.synchronize { @resources.delete(resource) }
+      nil
+    end
+
     # 关闭客户端：释放全部 control pool、HTTP transport 与后台线程
     def close
       pools = nil
@@ -188,29 +208,74 @@ module Sprites
         @pools = {}
       end
 
-      pools&.each(&:close)
-      streams = @streams_mutex.synchronize do
-        snapshot = @streams.keys
-        @streams.clear
+      resources = @resources_mutex.synchronize do
+        snapshot = @resources.keys
+        @resources.clear
         snapshot
       end
-      streams.each(&:close)
-      @http_transport&.close
+      (resources + Array(pools)).each do |resource|
+        resource.close
+      rescue StandardError
+        nil
+      end
+      begin
+        @http_transport&.close
+      rescue StandardError
+        nil
+      end
+      nil
     end
 
     # 当前 Client 持有的本地 data-plane connection 数；只读取已存在资源，不 dial。
     def open_connection_count
       http_count = @http_transport&.connection_count.to_i
       pools = @pools_mutex.synchronize { @pools.values.dup }
-      stream_count = @streams_mutex.synchronize do
-        @streams.keys.count(&:connection_open?)
+      resource_count = @resources_mutex.synchronize do
+        @resources.keys.count { |resource| resource.connection_open? }
       end
-      http_count + stream_count + pools.sum(&:size)
+      http_count + resource_count + pools.sum(&:size)
     end
 
     # 公开 HTTP 入口，供 filesystem 等模块复用同一 transport
-    def request(uri, req, read_timeout: nil, open_timeout: nil)
-      perform_request(uri, req, read_timeout: read_timeout, open_timeout: open_timeout)
+    def request(uri, req, read_timeout: nil, open_timeout: nil, write_timeout: nil)
+      perform_request(
+        uri,
+        req,
+        read_timeout:,
+        open_timeout:,
+        write_timeout:
+      )
+    end
+
+    # 在调用线程内消费 streaming response；block 返回前连接不会归还池。
+    def request_stream(uri, req, read_timeout: nil, open_timeout: nil, write_timeout: nil, &block)
+      raise ArgumentError, "block is required" unless block
+
+      if @owns_http_client
+        return @http_transport.request_stream(
+          uri,
+          req,
+          read_timeout:,
+          open_timeout:,
+          write_timeout:
+        ) do |response|
+          capture_version(response)
+          block.call(response)
+        end
+      end
+
+      @http_mutex.synchronize do
+        raise Error, "client is closed" if @closed
+
+        with_injected_timeouts(read_timeout:, open_timeout:, write_timeout:) do |http|
+          result = nil
+          http.request(req) do |response|
+            capture_version(response)
+            result = block.call(response)
+          end
+          result
+        end
+      end
     end
 
     # 使用 Fly.io macaroon token 创建 Sprite API token
@@ -260,9 +325,9 @@ module Sprites
     end
 
     # 执行 HTTP 请求并自动捕获版本头
-    def perform_request(uri, req, read_timeout: nil, open_timeout: nil)
+    def perform_request(uri, req, read_timeout: nil, open_timeout: nil, write_timeout: nil)
       if @owns_http_client
-        resp = @http_transport.request(uri, req, read_timeout:, open_timeout:)
+        resp = @http_transport.request(uri, req, read_timeout:, open_timeout:, write_timeout:)
         capture_version(resp)
         return resp
       end
@@ -270,33 +335,37 @@ module Sprites
       @http_mutex.synchronize do
         raise Error, "client is closed" if @closed
 
-        http = @http_client
-        previous_read = nil
-        previous_open = nil
-        if read_timeout && http.respond_to?(:read_timeout=)
-          previous_read = http.read_timeout
-          http.read_timeout = read_timeout
-        end
-        if open_timeout && http.respond_to?(:open_timeout=)
-          previous_open = http.open_timeout
-          http.open_timeout = open_timeout
-        end
-
-        begin
+        with_injected_timeouts(read_timeout:, open_timeout:, write_timeout:) do |http|
           resp = http.request(req)
           capture_version(resp)
           resp
-        ensure
-          http.read_timeout = previous_read if previous_read && http.respond_to?(:read_timeout=)
-          http.open_timeout = previous_open if previous_open && http.respond_to?(:open_timeout=)
         end
       end
+    end
+
+    def with_injected_timeouts(read_timeout:, open_timeout:, write_timeout:)
+      http = @http_client
+      previous = {}
+      {
+        read_timeout: read_timeout,
+        open_timeout: open_timeout,
+        write_timeout: write_timeout
+      }.each do |name, value|
+        next if value.nil? || !http.respond_to?(name) || !http.respond_to?(:"#{name}=")
+
+        previous[name] = http.public_send(name)
+        http.public_send(:"#{name}=", value)
+      end
+
+      yield http
+    ensure
+      previous&.each { |name, value| http.public_send(:"#{name}=", value) }
     end
 
     # Net::HTTP 默认会隐式重试 idempotent request，使上层 deadline 与重试策略失真。
     # SDK 只做一次 wire attempt；是否重试由理解业务语义的调用方决定。
     def disable_implicit_http_retries!(http)
-      http.max_retries = 0 if http&.respond_to?(:max_retries=)
+      http.max_retries = 0 if http.respond_to?(:max_retries=)
     end
 
     # ── HTTP 便捷方法 ──
@@ -311,7 +380,7 @@ module Sprites
       request(uri, req, read_timeout: read_timeout, open_timeout: open_timeout)
     end
 
-    def http_post(path, body)
+    def http_post(path, body, read_timeout: nil, open_timeout: nil, write_timeout: nil)
       uri = URI("#{@base_url}#{path}")
 
       req = Net::HTTP::Post.new(uri)
@@ -319,7 +388,7 @@ module Sprites
       req["Content-Type"] = "application/json"
       req.body = JSON.generate(body) if body
 
-      request(uri, req)
+      request(uri, req, read_timeout:, open_timeout:, write_timeout:)
     end
 
     def http_put(path, body)
@@ -353,12 +422,12 @@ module Sprites
     end
 
     # 用于流式响应的 POST（checkpoint/restore 等长时间操作）
-    def http_post_stream(path, body, params: {})
+    def http_post_stream(path, body, params: {}, json: true)
       uri = Routes.uri(@base_url, path, params: params)
 
       req = Net::HTTP::Post.new(uri)
       req["Authorization"] = "Bearer #{@token}"
-      req["Content-Type"] = "application/json"
+      req["Content-Type"] = "application/json" if json
       req.body = JSON.generate(body) if body
 
       stream_request(uri, req)
@@ -381,17 +450,32 @@ module Sprites
         uri: uri,
         request: req,
         timeout: 300,
-        on_release: -> { @streams_mutex.synchronize { @streams.delete(response) } }
+        on_release: -> { untrack_connection(response) }
       )
-
-      @pools_mutex.synchronize do
-        raise Error, "client is closed" if @closed
-
-        @streams_mutex.synchronize { @streams[response] = true }
-      end
+      track_connection(response)
       response.start
     rescue StandardError
       response&.close
+      raise
+    end
+
+    def open_websocket_json_stream(stream_class, path, **options)
+      stream = nil
+      connection = WebSocketConnection.new(
+        Routes.websocket_uri(@base_url, path).to_s,
+        headers: { "Authorization" => "Bearer #{@token}" },
+        timeout: @http_timeout
+      )
+      stream = stream_class.new(
+        connection,
+        **options,
+        on_release: -> { untrack_connection(stream) }
+      ).connect!
+      track_connection(stream)
+      stream
+    rescue StandardError
+      stream&.close
+      connection&.close
       raise
     end
 

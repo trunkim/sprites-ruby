@@ -78,6 +78,7 @@ module Sprites
       @tty = false
       @tty_size = nil
       @session_id = nil     # attach 时使用
+      @detachable = false
       @control_mode = false
       @control_conn = nil
       @ws_cmd = nil
@@ -152,6 +153,7 @@ module Sprites
       end
 
       configure_ws_cmd!(@ws_cmd)
+      track_ws_cmd!(@ws_cmd)
 
       begin
         @ws_cmd.start
@@ -169,6 +171,7 @@ module Sprites
           ws_url = build_websocket_url
           @ws_cmd = WsCmd.new(url: ws_url, headers: headers, name: @path, args: cmd_args)
           configure_ws_cmd!(@ws_cmd)
+          track_ws_cmd!(@ws_cmd)
           @ws_cmd.is_attach = true
           @ws_cmd.start
           return
@@ -322,6 +325,16 @@ module Sprites
       self
     end
 
+    # 创建可再次 attach 的 detachable session（必须在 start 前调用）。
+    def set_detachable(enable = true)
+      @mutex.synchronize do
+        raise Error, "sprite: SetDetachable after process started" if @started
+
+        @detachable = enable == true
+      end
+      self
+    end
+
     # 设置终端尺寸（start 前设初始大小，start 后调整运行中的终端）
     def set_tty_size(rows, cols)
       @mutex.synchronize do
@@ -431,6 +444,7 @@ module Sprites
       end
 
       params << ["cc", "true"] if @control_mode
+      params << ["detachable", "true"] if @detachable && !@session_id
       params << ["stdin", @stdin ? "true" : "false"]
       if !@session_id && !@max_run_after_disconnect.nil?
         params << ["max_run_after_disconnect", @max_run_after_disconnect.to_s]
@@ -450,6 +464,7 @@ module Sprites
       ws_cmd.dir = @dir
       ws_cmd.text_message_handler = @text_message_handler
       ws_cmd.max_run_after_disconnect = @max_run_after_disconnect
+      ws_cmd.detachable = @detachable
     end
 
     def release_control_conn!(conn)
@@ -460,6 +475,11 @@ module Sprites
       Sprites.dbg("sprites: returned control conn after exec", sprite: @sprite.name)
     rescue => e
       Sprites.dbg("sprites: control checkin failed", error: e.message)
+    end
+
+    def track_ws_cmd!(ws_cmd)
+      ws_cmd.on_release = -> { @sprite.client.untrack_connection(ws_cmd) }
+      @sprite.client.track_connection(ws_cmd)
     end
   end
 end

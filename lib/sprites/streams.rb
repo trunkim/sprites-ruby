@@ -26,6 +26,7 @@ module Sprites
         line = @body.gets
         unless line
           @done = true
+          close
           return
         end
 
@@ -39,8 +40,10 @@ module Sprites
         end
       end
     rescue Sprites::Error
+      close
       raise
     rescue StandardError => e
+      close
       raise Error, "stream read failed: #{e.class}: #{e.message}"
     end
 
@@ -129,6 +132,14 @@ module Sprites
   class SpriteStateStream < NDJSONStream
     def initialize(body)
       super(body) { |data| SpriteStateEvent.from_hash(data) }
+    end
+
+    alias next_event next_item
+  end
+
+  class SessionKillStream < NDJSONStream
+    def initialize(body)
+      super(body) { |data| SessionKillEvent.from_hash(data) }
     end
 
     alias next_event next_item

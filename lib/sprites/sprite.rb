@@ -47,6 +47,14 @@ module Sprites
       Cmd.new(sprite: self, name: name, args: args, ctx: ctx)
     end
 
+    # 构造 detachable TTY session；与 command 一样由调用方显式 start/run。
+    def create_session(name, *args)
+      command(name, *args).tap do |cmd|
+        cmd.set_tty(true)
+        cmd.set_detachable
+      end
+    end
+
     # 销毁此 sprite
     def destroy
       delete
@@ -58,7 +66,7 @@ module Sprites
     end
 
     # 升级此 sprite 到最新版本
-    def upgrade(ctx = nil)
+    def upgrade(_ctx = nil)
       client.upgrade_sprite(name)
     end
 

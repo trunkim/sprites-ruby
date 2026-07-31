@@ -16,7 +16,7 @@ Or install directly:
 gem install sprites
 ```
 
-**Requires Ruby >= 3.1** (tested with Ruby 3.4.9)
+**Requires Ruby >= 4.0** (tested with Ruby 4.0.6)
 
 ## Quick Start
 
@@ -51,6 +51,10 @@ client = Sprites::Client.new("your-auth-token",
 # Get a sprite handle
 sprite = client.sprite("my-sprite")
 ```
+
+`Client` 是连接生命周期边界。应用关闭 agent runtime、轮换 credential 或丢弃
+client 时必须调用 `client.close`；它会关闭 HTTP pool、active command、stream、watcher、
+proxy 与 control connection。
 
 ### Basic Command Execution
 
@@ -186,7 +190,39 @@ end
 # Attach to an existing session
 cmd = sprite.attach_session("session-id")
 cmd.run
+
+# Create a detachable TTY session, then start it explicitly
+session = sprite.create_session("bash", "-l")
+session.start
+
+# Kill a session and consume progress events
+sprite.kill_session("session-id", timeout: "5s").each do |event|
+  puts "#{event.type}: #{event.message}"
+end
 ```
+
+### HTTP Exec and Watchers
+
+```ruby
+# Non-TTY fallback for environments where WebSocket is unavailable.
+# Prefer WebSocket Cmd for large output; see docs/official-js-compatibility.md.
+result = sprite.exec_file_http(
+  "cat",
+  ["/etc/hostname"],
+  input: "",
+  timeout: 30
+)
+
+sprite.watch_ports.each { |event| puts event.inspect }
+
+sprite.filesystem_at("/app").watch(["src", "test"], recursive: true).each do |event|
+  puts "#{event.event}: #{event.path}"
+end
+```
+
+并发、Fiber scheduler 与 Puma 部署边界见
+[`docs/concurrency.md`](docs/concurrency.md)，官方 JS SDK 对照基线见
+[`docs/official-js-compatibility.md`](docs/official-js-compatibility.md)。
 
 ### Checkpoints
 

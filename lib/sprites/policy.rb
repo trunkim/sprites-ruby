@@ -19,17 +19,8 @@ module Sprites
 
     def update_network_policy(sprite_name, policy)
       resp = http_post(Routes.policy(sprite_name, "network"), policy.to_h)
-
-      case resp.code.to_i
-      when 204 then nil
-      when 400
-        api_err = APIError.parse(resp, resp.body)
-        raise api_err if api_err
-
-        raise Error, "invalid policy: #{resp.body}"
-      else
-        parse_response!(resp)
-      end
+      parse_response!(resp, expected: (200..299).to_a)
+      nil
     end
 
     def get_privileges_policy(sprite_name)
@@ -41,27 +32,14 @@ module Sprites
     def update_privileges_policy(sprite_name, policy)
       body = policy.respond_to?(:to_h) ? policy.to_h : policy
       resp = http_post(Routes.policy(sprite_name, "privileges"), body)
-
-      case resp.code.to_i
-      when 204 then nil
-      when 400
-        api_err = APIError.parse(resp, resp.body)
-        raise api_err if api_err
-
-        raise Error, "invalid privileges policy: #{resp.body}"
-      else
-        parse_response!(resp)
-      end
+      parse_response!(resp, expected: (200..299).to_a)
+      nil
     end
 
     def delete_privileges_policy(sprite_name)
       resp = http_delete(Routes.policy(sprite_name, "privileges"))
-
-      case resp.code.to_i
-      when 200, 204 then nil
-      else
-        parse_response!(resp)
-      end
+      parse_response!(resp, expected: (200..299).to_a)
+      nil
     end
 
     def get_resources_policy(sprite_name)
@@ -73,27 +51,14 @@ module Sprites
     def update_resources_policy(sprite_name, policy)
       body = policy.respond_to?(:to_h) ? policy.to_h : policy
       resp = http_post(Routes.policy(sprite_name, "resources"), body)
-
-      case resp.code.to_i
-      when 204 then nil
-      when 400
-        api_err = APIError.parse(resp, resp.body)
-        raise api_err if api_err
-
-        raise Error, "invalid resources policy: #{resp.body}"
-      else
-        parse_response!(resp)
-      end
+      parse_response!(resp, expected: (200..299).to_a)
+      nil
     end
 
     def delete_resources_policy(sprite_name)
       resp = http_delete(Routes.policy(sprite_name, "resources"))
-
-      case resp.code.to_i
-      when 200, 204 then nil
-      else
-        parse_response!(resp)
-      end
+      parse_response!(resp, expected: (200..299).to_a)
+      nil
     end
   end
 

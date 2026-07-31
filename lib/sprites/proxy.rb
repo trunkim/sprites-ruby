@@ -12,14 +12,23 @@
 
 require "socket"
 require "json"
+require "io/wait"
 
 module Sprites
   module Proxy
     def proxy_socket(network, sprite_name, addr)
       case network
       when "tcp"
-        ws_conn = dial_proxy_websocket(sprite_name)
-        init_socket_tcp(ws_conn, addr)
+        begin
+          ws_conn = dial_proxy_websocket(sprite_name)
+          connection = init_socket_tcp(ws_conn, addr)
+          connection.on_close = -> { untrack_connection(connection) }
+          track_connection(connection)
+        rescue StandardError
+          connection&.close
+          ws_conn&.close
+          raise
+        end
       else
         raise Error, "unsupported network type: #{network}"
       end
@@ -74,92 +83,144 @@ module Sprites
       msg = ws_conn.read_message
       raise Error, "failed to read proxy response" unless msg
 
-      _, data = msg
+      type, data = msg
+      raise Error, "unexpected proxy response frame: #{type}" unless type == :text
+
       response = JSON.parse(data)
       raise Error, "unexpected proxy status: #{response['status']}" unless response["status"] == "connected"
 
       ProxyConn.new(ws_conn, response["target"])
+    rescue StandardError
+      ws_conn&.close
+      raise
     end
 
     def parse_proxy_addr(addr)
-      host, port_str = addr.split(":", 2)
-      raise Error, "invalid address: #{addr}" unless port_str
+      value = addr.to_s
+      if (match = value.match(/\A\[([^\]]+)\]:(\d+)\z/))
+        host = match[1]
+        port_str = match[2]
+      else
+        host, separator, port_str = value.rpartition(":")
+        if separator.empty? || host.include?(":")
+          raise Error, "invalid address: #{addr}"
+        end
+      end
 
-      port = port_str.to_i
-      raise Error, "invalid port in address: #{addr}" if port < 1 || port > 65535
+      port = Integer(port_str, exception: false)
+      raise Error, "invalid port in address: #{addr}" unless port&.between?(1, 65_535)
 
       host = "localhost" if host.empty?
       [host, port]
     end
 
     def create_proxy_session(sprite_name, mapping)
-      server = TCPServer.new("localhost", mapping.local_port)
+      local_port = Integer(mapping.local_port)
+      remote_port = Integer(mapping.remote_port)
+      raise ArgumentError, "local_port must be between 0 and 65535" unless local_port.between?(0, 65_535)
+      raise ArgumentError, "remote_port must be between 1 and 65535" unless remote_port.between?(1, 65_535)
+
+      server = TCPServer.new("127.0.0.1", local_port)
 
       session = ProxySession.new(
-        local_port: mapping.local_port,
-        remote_port: mapping.remote_port,
+        local_port: local_port,
+        remote_port: remote_port,
         remote_host: mapping.remote_host,
         listener: server,
         client: self,
-        sprite_name: sprite_name
+        sprite_name: sprite_name,
+        on_close: -> { untrack_connection(session) }
       )
 
+      track_connection(session)
       session.start_accept_loop
       session
+    rescue StandardError
+      session&.close
+      server&.close
+      raise
     end
   end
 
   class ProxyConn
     attr_reader :remote_target
+    attr_accessor :on_close
 
     def initialize(ws_conn, target)
       @ws_conn = ws_conn
       @remote_target = target
       @read_mutex = Mutex.new
       @write_mutex = Mutex.new
+      @state_mutex = Mutex.new
       @closed = false
+      @released = false
       @read_buffer = +""
     end
 
     def read(length)
+      length = Integer(length)
+      raise ArgumentError, "length must be >= 0" if length.negative?
+      return +"".b if length.zero?
+
       @read_mutex.synchronize do
-        while @read_buffer.bytesize < length
+        while @read_buffer.empty?
           msg = @ws_conn.read_message
-          return nil unless msg
+          unless msg
+            close
+            return nil
+          end
 
           msg_type, data = msg
+          if msg_type == :close
+            close
+            return nil
+          end
           next unless msg_type == :binary
 
           @read_buffer << data
         end
 
-        @read_buffer.slice!(0, length)
+        @read_buffer.slice!(0, [length, @read_buffer.bytesize].min)
       end
     end
 
     def write(data)
       @write_mutex.synchronize do
+        raise IOError, "closed proxy connection" if closed?
+
         @ws_conn.write_binary(data)
         data.bytesize
       end
     end
 
     def close
-      return if @closed
+      release = @state_mutex.synchronize do
+        return if @closed && @released
 
-      @closed = true
-      @ws_conn.close rescue nil
+        @closed = true
+        next if @released
+
+        @released = true
+        @on_close
+      end
+      @ws_conn.close
+    rescue StandardError
+      nil
+    ensure
+      release&.call
     end
 
     def closed?
-      @closed
+      @state_mutex.synchronize { @closed }
     end
+
+    def connection_open? = !closed?
   end
 
   class ProxySession
     attr_reader :local_port, :remote_port, :remote_host
 
-    def initialize(local_port:, remote_port:, remote_host:, listener:, client:, sprite_name:)
+    def initialize(local_port:, remote_port:, remote_host:, listener:, client:, sprite_name:, on_close: nil)
       @local_port = local_port
       @remote_port = remote_port
       @remote_host = remote_host || "localhost"
@@ -169,20 +230,39 @@ module Sprites
       @closed = false
       @close_mutex = Mutex.new
       @accept_thread = nil
+      @connections = {}.compare_by_identity
+      @handler_threads = {}.compare_by_identity
+      @on_close = on_close
+      @released = false
     end
 
     def start_accept_loop
-      @accept_thread = Thread.new { accept_loop }
+      @close_mutex.synchronize do
+        raise Error, "proxy session is closed" if @closed
+        raise Error, "proxy session already started" if @accept_thread
+
+        @accept_thread = Thread.new { accept_loop }
+        @accept_thread.report_on_exception = false
+      end
+      self
     end
 
     def close
-      @close_mutex.synchronize do
+      listener, accept_thread, connections, handlers, release = @close_mutex.synchronize do
         return if @closed
 
         @closed = true
-        @listener&.close rescue nil
-        @accept_thread&.kill rescue nil
+        snapshot = @connections.flat_map { |local, remote| [local, remote] }.compact
+        [@listener, @accept_thread, snapshot, @handler_threads.keys, release_callback]
       end
+
+      close_io(listener)
+      connections.each { |connection| close_io(connection) }
+      join_owned_thread(accept_thread)
+      handlers.each { |thread| join_owned_thread(thread) }
+      nil
+    ensure
+      release&.call
     end
 
     def local_addr
@@ -192,6 +272,12 @@ module Sprites
     def wait
       @accept_thread&.join
     end
+
+    def closed?
+      @close_mutex.synchronize { @closed }
+    end
+
+    def connection_open? = !closed?
 
     private
 
@@ -205,7 +291,17 @@ module Sprites
           break
         end
 
-        Thread.new(conn) { |c| handle_connection(c) }
+        @close_mutex.synchronize do
+          if @closed
+            close_io(conn)
+            break
+          end
+
+          @connections[conn] = nil
+          thread = Thread.new(conn) { |local| handle_connection(local) }
+          thread.report_on_exception = false
+          @handler_threads[thread] = true
+        end
       end
     rescue => e
       Sprites.dbg("sprites: proxy accept error", error: e.message)
@@ -216,23 +312,35 @@ module Sprites
 
       ws_conn = @client.send(:dial_proxy_websocket, @sprite_name)
       remote_conn = @client.send(:init_socket_tcp, ws_conn, addr)
-
-      t1 = Thread.new do
-        copy_stream(local_conn, remote_conn)
-        remote_conn.close rescue nil
+      closed = @close_mutex.synchronize do
+        if @closed
+          true
+        else
+          @connections[local_conn] = remote_conn
+          false
+        end
       end
+      return if closed
 
-      t2 = Thread.new do
+      remote_reader = Thread.new do
         copy_stream_from_proxy(remote_conn, local_conn)
-        local_conn.close rescue nil
+        close_io(local_conn)
       end
+      remote_reader.report_on_exception = false
 
-      t1.join
-      t2.join
+      copy_stream(local_conn, remote_conn)
+      close_io(remote_conn)
+      join_owned_thread(remote_reader)
     rescue => e
       Sprites.dbg("sprites: proxy connection error", error: e.message)
     ensure
-      local_conn&.close rescue nil
+      close_io(remote_conn)
+      close_io(local_conn)
+      join_owned_thread(remote_reader)
+      @close_mutex.synchronize do
+        @connections.delete(local_conn)
+        @handler_threads.delete(Thread.current)
+      end
     end
 
     def copy_stream(from_io, to_proxy)
@@ -241,7 +349,7 @@ module Sprites
         data = from_io.read_nonblock(32768, buf, exception: false)
         case data
         when :wait_readable
-          IO.select([from_io], nil, nil, 1)
+          from_io.wait_readable(1)
         when nil
           break
         else
@@ -261,6 +369,29 @@ module Sprites
       end
     rescue IOError, Errno::ECONNRESET
       # connection closed
+    end
+
+    def release_callback
+      return if @released
+
+      @released = true
+      @on_close
+    end
+
+    def close_io(io)
+      io&.close unless io&.closed?
+    rescue IOError, SystemCallError, OpenSSL::SSL::SSLError
+      nil
+    end
+
+    def join_owned_thread(thread)
+      return unless thread&.alive? && !thread.equal?(Thread.current)
+
+      thread.join(1)
+      return unless thread.alive?
+
+      thread.kill
+      thread.join
     end
   end
 

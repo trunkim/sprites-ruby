@@ -2,7 +2,7 @@
 
 # 所有 API 数据模型定义
 #
-# 使用 Ruby 3.2+ 的 Data.define 实现不可变值对象。
+# 使用 Ruby 4 的 Data.define 实现不可变值对象。
 # 每个类型都提供 .from_hash(hash) 工厂方法，用于从 API JSON 响应中构建。
 
 require "time"
@@ -218,7 +218,7 @@ module Sprites
         command: hash["command"]&.to_s,
         workdir: hash["workdir"],
         created: hash["created"] ? Time.parse(hash["created"]) : nil,
-        bytes_per_second: hash["bytes_per_second"]&.to_f || 0.0,
+        bytes_per_second: hash["bytes_per_second"].to_f,
         is_active: hash["is_active"] || false,
         last_activity: hash["last_activity"] ? Time.parse(hash["last_activity"]) : nil,
         tty: hash["tty"] || false
@@ -289,12 +289,13 @@ module Sprites
 
   # Privileges policy（capability / device 限制）。
   # 官方 JSON：profile、devices[]、noNewPrivileges（camelCase）。
+  PRIVILEGES_POLICY_PROFILES = [ "", "minimal", "standard", "privileged" ].freeze
+
   PrivilegesPolicy = Data.define(:profile, :devices, :no_new_privileges) do
-    PROFILES = [ "", "minimal", "standard", "privileged" ].freeze
 
     def initialize(profile: nil, devices: nil, no_new_privileges: nil)
-      unless profile.nil? || PROFILES.include?(profile.to_s)
-        raise ArgumentError, "privileges profile must be one of #{PROFILES.inspect}"
+      unless profile.nil? || PRIVILEGES_POLICY_PROFILES.include?(profile.to_s)
+        raise ArgumentError, "privileges profile must be one of #{PRIVILEGES_POLICY_PROFILES.inspect}"
       end
 
       super(
@@ -405,6 +406,23 @@ module Sprites
         signal: hash["signal"],
         pid: hash["pid"],
         exit_code: hash["exit_code"]
+      )
+    end
+  end
+
+  FilesystemWatchEvent = Data.define(
+    :type, :paths, :path, :event, :timestamp, :size, :is_dir, :message
+  ) do
+    def self.from_hash(hash)
+      new(
+        type: hash["type"],
+        paths: hash["paths"],
+        path: hash["path"],
+        event: hash["event"],
+        timestamp: hash["timestamp"],
+        size: hash["size"],
+        is_dir: hash["isDir"],
+        message: hash["message"]
       )
     end
   end

@@ -8,19 +8,22 @@ RSpec.describe Sprites::HTTPTransport do
   end
 
   class FakeHTTPConnection
-    attr_accessor :read_timeout, :open_timeout
+    attr_accessor :read_timeout, :open_timeout, :write_timeout
     attr_reader :finish_count
 
     def initialize(&request_handler)
       @request_handler = request_handler
       @read_timeout = 30
       @open_timeout = 30
+      @write_timeout = 30
       @started = true
       @finish_count = 0
     end
 
     def request(request)
-      @request_handler.call(request, self)
+      response = @request_handler.call(request, self)
+      yield response if block_given?
+      response
     end
 
     def started? = @started
@@ -80,6 +83,44 @@ RSpec.describe Sprites::HTTPTransport do
     transport.request(uri, Net::HTTP::Get.new(uri))
 
     expect(observed).to eq([[2, 3], [30, 30]])
+  ensure
+    transport&.close
+  end
+
+  it "consumes streaming responses in the caller and preserves delivered chunks" do
+    chunks = ["\x01out".b, "\x03\x00".b]
+    streaming_response = Response.new("200", nil, {})
+    streaming_response.define_singleton_method(:read_body) do |&block|
+      chunks.each(&block)
+    end
+    connection = FakeHTTPConnection.new { streaming_response }
+    transport = described_class.new(base_url:, connection_factory: ->(*) { connection })
+
+    delivered = transport.request_stream(
+      uri,
+      Net::HTTP::Post.new(uri),
+      read_timeout: 2,
+      open_timeout: 3,
+      write_timeout: 4
+    ) { |response| response.read_body.to_a }
+
+    expect(delivered).to eq(chunks)
+    expect([connection.read_timeout, connection.open_timeout, connection.write_timeout])
+      .to eq([30, 30, 30])
+    expect(transport.connection_count).to eq(1)
+  ensure
+    transport&.close
+  end
+
+  it "discards a streaming connection when body processing fails" do
+    connection = FakeHTTPConnection.new { response }
+    transport = described_class.new(base_url:, connection_factory: ->(*) { connection })
+
+    expect {
+      transport.request_stream(uri, Net::HTTP::Get.new(uri)) { raise "bad frame" }
+    }.to raise_error(RuntimeError, "bad frame")
+    expect(transport.connection_count).to eq(0)
+    expect(connection.finish_count).to eq(1)
   ensure
     transport&.close
   end
