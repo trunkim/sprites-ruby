@@ -175,8 +175,8 @@ module Sprites
     end
 
     # 公开 HTTP 入口，供 filesystem 等模块复用同一 transport
-    def request(uri, req, read_timeout: nil)
-      perform_request(uri, req, read_timeout: read_timeout)
+    def request(uri, req, read_timeout: nil, open_timeout: nil)
+      perform_request(uri, req, read_timeout: read_timeout, open_timeout: open_timeout)
     end
 
     # 使用 Fly.io macaroon token 创建 Sprite API token
@@ -226,15 +226,20 @@ module Sprites
     end
 
     # 执行 HTTP 请求并自动捕获版本头
-    def perform_request(uri, req, read_timeout: nil)
+    def perform_request(uri, req, read_timeout: nil, open_timeout: nil)
       @http_mutex.synchronize do
         raise Error, "client is closed" if @closed
 
         http = http_transport_for(uri)
         previous_read = nil
+        previous_open = nil
         if read_timeout && http.respond_to?(:read_timeout=)
           previous_read = http.read_timeout
           http.read_timeout = read_timeout
+        end
+        if open_timeout && http.respond_to?(:open_timeout=)
+          previous_open = http.open_timeout
+          http.open_timeout = open_timeout
         end
 
         begin
@@ -243,6 +248,7 @@ module Sprites
           resp
         ensure
           http.read_timeout = previous_read if previous_read && http.respond_to?(:read_timeout=)
+          http.open_timeout = previous_open if previous_open && http.respond_to?(:open_timeout=)
         end
       end
     end
@@ -276,14 +282,14 @@ module Sprites
 
     # ── HTTP 便捷方法 ──
 
-    def http_get(path, params: {}, read_timeout: nil)
+    def http_get(path, params: {}, read_timeout: nil, open_timeout: nil)
       uri = URI("#{@base_url}#{path}")
       uri.query = URI.encode_www_form(params) unless params.empty?
 
       req = Net::HTTP::Get.new(uri)
       req["Authorization"] = "Bearer #{@token}"
 
-      request(uri, req, read_timeout: read_timeout)
+      request(uri, req, read_timeout: read_timeout, open_timeout: open_timeout)
     end
 
     def http_post(path, body)

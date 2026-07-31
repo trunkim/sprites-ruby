@@ -24,11 +24,17 @@ RSpec.describe Sprites::Sessions do
       expect(sessions.first.tty).to be true
     end
 
-    it "forwards a bounded read timeout" do
+    it "forwards bounded open and read timeouts" do
       response = Struct.new(:code, :body) do
         def [](_key) = nil
       end.new("200", JSON.generate({ sessions: [] }))
-      http = instance_double(Net::HTTP, read_timeout: 30, "read_timeout=": nil)
+      http = instance_double(
+        Net::HTTP,
+        read_timeout: 30,
+        open_timeout: 30,
+        "read_timeout=": nil,
+        "open_timeout=": nil
+      )
       allow(http).to receive(:request).and_return(response)
       bounded = Sprites::Client.new(
         "test-token",
@@ -38,7 +44,9 @@ RSpec.describe Sprites::Sessions do
 
       expect(bounded.list_sessions("demo", timeout: 2)).to eq([])
       expect(http).to have_received(:read_timeout=).with(2).ordered
+      expect(http).to have_received(:open_timeout=).with(2).ordered
       expect(http).to have_received(:read_timeout=).with(30).ordered
+      expect(http).to have_received(:open_timeout=).with(30).ordered
     end
   end
 

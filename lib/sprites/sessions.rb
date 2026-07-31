@@ -10,7 +10,11 @@ require "json"
 module Sprites
   module Sessions
     def list_sessions(sprite_name, timeout: nil)
-      resp = http_get("/v1/sprites/#{sprite_name}/exec", read_timeout: timeout)
+      resp = http_get(
+        "/v1/sprites/#{sprite_name}/exec",
+        read_timeout: timeout,
+        open_timeout: timeout
+      )
       data = parse_response!(resp)
 
       sessions_raw = data["sessions"] || []
