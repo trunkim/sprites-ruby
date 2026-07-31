@@ -20,7 +20,8 @@ module Sprites
     # 来自 API 响应的详细字段
     attr_accessor :id, :organization_name, :status, :config, :environment,
                   :created_at, :updated_at, :bucket_name, :primary_region,
-                  :url, :url_settings, :labels, :last_running_at, :last_warming_at,
+                  :url, :url_settings, :version, :environment_version,
+                  :labels, :last_running_at, :last_warming_at,
                   :use_legacy_exec_endpoint
 
     def initialize(name:, client:, org: nil)
@@ -59,6 +60,18 @@ module Sprites
     # 升级此 sprite 到最新版本
     def upgrade(ctx = nil)
       client.upgrade_sprite(name)
+    end
+
+    def restart
+      client.restart_sprite(name)
+    end
+
+    def check
+      client.check_sprite(name)
+    end
+
+    def update(url_settings: nil, labels: nil)
+      client.update_sprite(name, url_settings:, labels:)
     end
 
     # 更新此 sprite 的 URL 认证设置
@@ -114,6 +127,8 @@ module Sprites
       sprite.primary_region = info.primary_region
       sprite.url = info.url
       sprite.url_settings = info.url_settings
+      sprite.version = info.version
+      sprite.environment_version = info.environment_version
       sprite.labels = info.labels
       sprite.last_running_at = info.last_running_at
       sprite.last_warming_at = info.last_warming_at

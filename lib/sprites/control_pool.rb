@@ -279,10 +279,7 @@ module Sprites
 
     # 构建控制端点的 WebSocket URL
     def build_control_url
-      base = @client.base_url
-      base = base.sub(/\Ahttp/, "ws")
-
-      "#{base}/v1/sprites/#{@sprite_name}/control"
+      Routes.websocket_uri(@client.base_url, Routes.control(@sprite_name)).to_s
     end
 
     private

@@ -21,6 +21,7 @@ Gem::Specification.new do |spec|
   spec.add_dependency "net-http"
   spec.add_dependency "json"
   spec.add_dependency "openssl"
+  spec.add_dependency "base64"
 
   spec.metadata["rubygems_mfa_required"] = "true"
 end

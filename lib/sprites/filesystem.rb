@@ -22,26 +22,29 @@ module Sprites
     end
 
     def read_file(name)
-      resp = http_get("/fs/read", path: name, workingDir: @working_dir)
+      resp = http_get("/read", path: name, workingDir: @working_dir)
       raise_fs_error!("read", name, resp) unless [200, 206].include?(resp.code.to_i)
 
       resp.body
     end
 
-    def write_file(name, data, mode: 0o644)
+    def write_file(name, data, mode: 0o644, mkdir_parents: true)
       resp = http_put_binary(
-        "/fs/write",
+        "/write",
         data,
         path: name,
         workingDir: @working_dir,
         mode: format("%04o", mode),
-        mkdirParents: "true"
+        mkdirParents: mkdir_parents ? "true" : "false"
       )
       raise_fs_error!("write", name, resp) unless [200, 201].include?(resp.code.to_i)
     end
 
-    def read_dir(name)
-      resp = http_get("/fs/list", path: name, workingDir: @working_dir)
+    def read_dir(name, recursive: false, pattern: nil)
+      params = { path: name, workingDir: @working_dir }
+      params[:recursive] = "true" if recursive
+      params[:pattern] = pattern if pattern
+      resp = http_get("/list", **params)
       raise_fs_error!("readdir", name, resp) unless resp.code.to_i == 200
 
       data = JSON.parse(resp.body)
@@ -49,7 +52,7 @@ module Sprites
     end
 
     def stat(name)
-      resp = http_get("/fs/list", path: name, workingDir: @working_dir)
+      resp = http_get("/list", path: name, workingDir: @working_dir)
       raise_fs_error!("stat", name, resp) unless resp.code.to_i == 200
 
       data = JSON.parse(resp.body)
@@ -59,51 +62,111 @@ module Sprites
       FSEntry.new(entries.first)
     end
 
-    def mkdir(name, mode: 0o755)
-      write_file("#{name}/.keep", "", mode: mode)
+    def mkdir(name, mode: 0o755, recursive: true)
+      write_file("#{name}/.keep", "", mode: mode, mkdir_parents: recursive)
     end
 
     def mkdir_all(name, mode: 0o755)
-      mkdir(name, mode: mode)
+      mkdir(name, mode: mode, recursive: true)
     end
 
-    def remove(name)
-      resp = http_delete("/fs/delete", path: name, workingDir: @working_dir)
-      raise_fs_error!("remove", name, resp) unless resp.code.to_i == 200
+    def remove(name, recursive: false, force: false, as_root: false)
+      params = { path: name, workingDir: @working_dir }
+      params[:recursive] = "true" if recursive
+      params[:asRoot] = "true" if as_root
+      resp = http_delete("/delete", **params)
+      return if success?(resp) || (force && resp.code.to_i == 404)
+
+      raise_fs_error!("remove", name, resp)
     end
 
-    def remove_all(name)
-      resp = http_delete("/fs/delete", path: name, workingDir: @working_dir, recursive: "true")
-      raise_fs_error!("remove", name, resp) unless resp.code.to_i == 200
+    def remove_all(name, force: false, as_root: false)
+      remove(name, recursive: true, force: force, as_root: as_root)
     end
 
-    def rename(old_name, new_name)
+    def rename(old_name, new_name, as_root: false)
       body = { source: old_name, dest: new_name, workingDir: @working_dir }
-      resp = http_post_json("/fs/rename", body)
-      raise_fs_error!("rename", old_name, resp) unless resp.code.to_i == 200
+      body[:asRoot] = true if as_root
+      resp = http_post_json("/rename", body)
+      raise_fs_error!("rename", old_name, resp) unless success?(resp)
     end
 
-    def copy(src, dst)
-      body = { source: src, dest: dst, workingDir: @working_dir, recursive: true }
-      resp = http_post_json("/fs/copy", body)
-      raise_fs_error!("copy", src, resp) unless resp.code.to_i == 200
+    def copy(src, dst, recursive: true, preserve_attrs: false, as_root: false)
+      body = {
+        source: src,
+        dest: dst,
+        workingDir: @working_dir,
+        recursive: recursive,
+        preserveAttrs: preserve_attrs,
+        asRoot: as_root
+      }
+      resp = http_post_json("/copy", body)
+      raise_fs_error!("copy", src, resp) unless success?(resp)
     end
 
-    def chmod(name, mode)
-      body = { path: name, workingDir: @working_dir, mode: format("%04o", mode & 0o777) }
-      resp = http_post_json("/fs/chmod", body)
-      raise_fs_error!("chmod", name, resp) unless resp.code.to_i == 200
+    def chmod(name, mode, recursive: false, as_root: false)
+      body = {
+        path: name,
+        workingDir: @working_dir,
+        mode: format("%04o", mode & 0o777),
+        recursive: recursive,
+        asRoot: as_root
+      }
+      resp = http_post_json("/chmod", body)
+      raise_fs_error!("chmod", name, resp) unless success?(resp)
+    end
+
+    def chown(name, uid: nil, gid: nil, recursive: false, as_root: false)
+      raise ArgumentError, "uid or gid is required" if uid.nil? && gid.nil?
+
+      body = {
+        path: name,
+        workingDir: @working_dir,
+        uid: uid,
+        gid: gid,
+        recursive: recursive,
+        asRoot: as_root
+      }.compact
+      resp = http_post_json("/chown", body)
+      raise_fs_error!("chown", name, resp) unless success?(resp)
+    end
+
+    def exists?(name)
+      stat(name)
+      true
+    rescue FSNotFoundError
+      false
+    end
+
+    def append_file(name, data, mode: 0o644)
+      current = read_file(name)
+      write_file(name, current + data.to_s, mode: mode)
+    rescue FSNotFoundError
+      write_file(name, data, mode: mode)
+    end
+
+    def read_json(name)
+      JSON.parse(read_file(name))
+    end
+
+    def write_json(name, value, spaces: nil, mode: 0o644)
+      content = if spaces.nil? || Integer(spaces).zero?
+        JSON.generate(value)
+      else
+        indent = " " * Integer(spaces)
+        JSON.generate(value, indent: indent, space: " ", object_nl: "\n", array_nl: "\n")
+      end
+      write_file(name, content, mode: mode)
     end
 
     private
 
     def base_url
-      "#{@sprite.client.base_url}/v1/sprites/#{@sprite.name}"
+      "#{@sprite.client.base_url}#{Routes.filesystem(@sprite.name)}"
     end
 
     def http_get(path, **params)
-      uri = URI("#{base_url}#{path}")
-      uri.query = URI.encode_www_form(params) unless params.empty?
+      uri = Routes.uri(base_url, path, params: params)
 
       req = Net::HTTP::Get.new(uri)
       req["Authorization"] = "Bearer #{@sprite.client.token}"
@@ -112,8 +175,7 @@ module Sprites
     end
 
     def http_delete(path, **params)
-      uri = URI("#{base_url}#{path}")
-      uri.query = URI.encode_www_form(params) unless params.empty?
+      uri = Routes.uri(base_url, path, params: params)
 
       req = Net::HTTP::Delete.new(uri)
       req["Authorization"] = "Bearer #{@sprite.client.token}"
@@ -122,8 +184,7 @@ module Sprites
     end
 
     def http_put_binary(path, data, **params)
-      uri = URI("#{base_url}#{path}")
-      uri.query = URI.encode_www_form(params) unless params.empty?
+      uri = Routes.uri(base_url, path, params: params)
 
       req = Net::HTTP::Put.new(uri)
       req["Authorization"] = "Bearer #{@sprite.client.token}"
@@ -134,7 +195,7 @@ module Sprites
     end
 
     def http_post_json(path, body)
-      uri = URI("#{base_url}#{path}")
+      uri = Routes.uri(base_url, path)
 
       req = Net::HTTP::Post.new(uri)
       req["Authorization"] = "Bearer #{@sprite.client.token}"
@@ -148,20 +209,36 @@ module Sprites
       @sprite.client.request(uri, req)
     end
 
+    def success?(response)
+      response.code.to_i.between?(200, 299)
+    end
+
     def raise_fs_error!(op, path, resp)
       status = resp.code.to_i
-      if status == 404
-        raise FSNotFoundError.new(op, path, status_code: status)
-      end
-
       begin
         data = JSON.parse(resp.body)
+        if status == 404 || data["code"] == "ENOENT"
+          raise FSNotFoundError.new(
+            op,
+            data["path"] || path,
+            message: data["error"],
+            status_code: status
+          )
+        end
         if data["error"]
-          raise FSError.new(op, path, data["error"], status_code: status)
+          raise FSError.new(
+            op,
+            data["path"] || path,
+            data["error"],
+            code: data["code"],
+            status_code: status
+          )
         end
       rescue JSON::ParserError
         # ignore
       end
+
+      raise FSNotFoundError.new(op, path, status_code: status) if status == 404
 
       raise FSError.new(op, path, "HTTP #{resp.code}", status_code: status)
     end
@@ -181,22 +258,32 @@ module Sprites
     end
 
     alias dir? dir
+
+    def file? = !dir? && type != "symlink"
+    def symlink? = type == "symlink"
+
+    def mode_value
+      return mode if mode.is_a?(Integer)
+
+      mode.to_s.to_i(8)
+    end
   end
 
   class FSError < Error
-    attr_reader :op, :path, :status_code
+    attr_reader :op, :path, :code, :status_code
 
-    def initialize(op, path, message, status_code: nil)
+    def initialize(op, path, message, code: nil, status_code: nil)
       @op = op
       @path = path
+      @code = code || "UNKNOWN"
       @status_code = status_code
       super("#{op} #{path}: #{message}")
     end
   end
 
   class FSNotFoundError < FSError
-    def initialize(op, path, status_code: 404)
-      super(op, path, "file not found", status_code: status_code)
+    def initialize(op, path, message: nil, status_code: 404)
+      super(op, path, message || "file not found", code: "ENOENT", status_code: status_code)
     end
   end
 

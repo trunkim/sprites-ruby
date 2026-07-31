@@ -33,6 +33,16 @@ RSpec.describe Sprites::Client do
       client = described_class.new(token)
       expect { client.close }.not_to raise_error
     end
+
+    it "fences owned HTTP requests and reports all local connections closed" do
+      client = described_class.new(token, base_url: "http://localhost:8080")
+      client.close
+
+      expect(client.open_connection_count).to eq(0)
+      uri = URI("http://localhost:8080/v1/sprites")
+      expect { client.request(uri, Net::HTTP::Get.new(uri)) }
+        .to raise_error(Sprites::Error, "client is closed")
+    end
   end
 
   describe "#sprite" do

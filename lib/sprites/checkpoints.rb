@@ -14,15 +14,8 @@ module Sprites
       payload = {}
       payload[:comment] = comment if comment && !comment.empty?
 
-      resp = http_post_stream("/v1/sprites/#{sprite_name}/checkpoint", payload)
-      unless [200, 201].include?(resp.code.to_i)
-        api_err = APIError.parse(resp, resp.body)
-        raise api_err if api_err
-
-        raise Error, "create checkpoint failed (status #{resp.code}): #{resp.body}"
-      end
-
-      CheckpointStream.new(resp.body)
+      resp = http_post_stream(Routes.checkpoint_create(sprite_name), payload)
+      CheckpointStream.new(parse_stream_response!(resp, expected: [200, 201]))
     end
 
     # 消费 create 流并校验 error/complete 终态；不从 terminal 文本解析 checkpoint id。
@@ -39,7 +32,7 @@ module Sprites
       params["history"] = history_filter if history_filter
       params["includeAuto"] = "true" if include_auto
 
-      resp = http_get("/v1/sprites/#{sprite_name}/checkpoints", params: params)
+      resp = http_get(Routes.checkpoints(sprite_name), params: params)
       data = parse_response!(resp)
 
       return data if data.is_a?(String)
@@ -48,7 +41,7 @@ module Sprites
     end
 
     def get_checkpoint(sprite_name, checkpoint_id)
-      resp = http_get("/v1/sprites/#{sprite_name}/checkpoints/#{checkpoint_id}")
+      resp = http_get(Routes.checkpoint(sprite_name, checkpoint_id))
       data = parse_response!(resp)
       Checkpoint.from_hash(data)
     end
@@ -71,19 +64,12 @@ module Sprites
     end
 
     def restore_checkpoint(sprite_name, checkpoint_id)
-      resp = http_post_stream("/v1/sprites/#{sprite_name}/checkpoints/#{checkpoint_id}/restore", nil)
-      unless [200, 201].include?(resp.code.to_i)
-        api_err = APIError.parse(resp, resp.body)
-        raise api_err if api_err
-
-        raise Error, "restore checkpoint failed (status #{resp.code}): #{resp.body}"
-      end
-
-      RestoreStream.new(resp.body)
+      resp = http_post_stream(Routes.checkpoint_restore(sprite_name, checkpoint_id), nil)
+      RestoreStream.new(parse_stream_response!(resp, expected: [200, 201]))
     end
 
     def delete_checkpoint(sprite_name, checkpoint_id)
-      resp = http_delete("/v1/sprites/#{sprite_name}/checkpoints/#{checkpoint_id}")
+      resp = http_delete(Routes.checkpoint(sprite_name, checkpoint_id))
       return if [200, 204].include?(resp.code.to_i)
 
       parse_response!(resp)

@@ -397,21 +397,18 @@ module Sprites
 
     # 构建 exec 端点的 WebSocket URL
     def build_websocket_url
-      base = @sprite.client.base_url.sub(/\Ahttp/, "ws")
-
-      uri = URI.parse(base)
-      params = URI.decode_www_form(uri.query || "")
+      params = []
 
       # attach 操作：根据版本选择 path 格式或 query 格式
       if @session_id
         if @sprite.use_legacy_exec_endpoint? || !@sprite.client.supports_path_attach?
-          uri.path = "/v1/sprites/#{@sprite.name}/exec"
+          path = Routes.exec(@sprite.name)
           params << ["id", @session_id]
         else
-          uri.path = "/v1/sprites/#{@sprite.name}/exec/#{@session_id}"
+          path = Routes.session(@sprite.name, @session_id)
         end
       else
-        uri.path = "/v1/sprites/#{@sprite.name}/exec"
+        path = Routes.exec(@sprite.name)
       end
 
       # 新建命令时添加 cmd 和 path 参数
@@ -439,8 +436,7 @@ module Sprites
         params << ["max_run_after_disconnect", @max_run_after_disconnect.to_s]
       end
 
-      uri.query = URI.encode_www_form(params)
-      uri.to_s
+      Routes.websocket_uri(@sprite.client.base_url, path, params: params).to_s
     end
 
     def configure_ws_cmd!(ws_cmd)

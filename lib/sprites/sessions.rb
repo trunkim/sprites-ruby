@@ -11,7 +11,7 @@ module Sprites
   module Sessions
     def list_sessions(sprite_name, timeout: nil)
       resp = http_get(
-        "/v1/sprites/#{sprite_name}/exec",
+        Routes.exec(sprite_name),
         read_timeout: timeout,
         open_timeout: timeout
       )

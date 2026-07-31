@@ -62,12 +62,14 @@ module Sprites
   SpriteInfo = Data.define(
     :id, :name, :organization, :status, :config, :environment,
     :created_at, :updated_at, :bucket_name, :primary_region,
-    :url, :url_settings, :labels, :last_running_at, :last_warming_at
+    :url, :url_settings, :version, :environment_version,
+    :labels, :last_running_at, :last_warming_at
   ) do
     def initialize(id: nil, name: nil, organization: nil, status: nil,
                    config: nil, environment: nil, created_at: nil, updated_at: nil,
                    bucket_name: nil, primary_region: nil, url: nil, url_settings: nil,
-                   labels: nil, last_running_at: nil, last_warming_at: nil)
+                   version: nil, environment_version: nil, labels: nil,
+                   last_running_at: nil, last_warming_at: nil)
       super
     end
 
@@ -87,6 +89,8 @@ module Sprites
         primary_region: hash["primary_region"],
         url: hash["url"],
         url_settings: URLSettings.from_hash(hash["url_settings"]),
+        version: hash["version"],
+        environment_version: hash["environment_version"],
         labels: hash["labels"],
         last_running_at: hash["last_running_at"] ? Time.parse(hash["last_running_at"]) : nil,
         last_warming_at: hash["last_warming_at"] ? Time.parse(hash["last_warming_at"]) : nil
@@ -120,12 +124,13 @@ module Sprites
   LIST_MAX_RESULTS_DEFAULT = LIST_MAX_RESULTS_MAX
 
   # 列出 sprites 时的分页/过滤选项
-  ListOptions = Data.define(:prefix, :max_results, :continuation_token) do
-    def initialize(prefix: nil, max_results: LIST_MAX_RESULTS_DEFAULT, continuation_token: nil)
+  ListOptions = Data.define(:prefix, :max_results, :continuation_token, :bulk_load) do
+    def initialize(prefix: nil, max_results: LIST_MAX_RESULTS_DEFAULT, continuation_token: nil, bulk_load: false)
       super(
         prefix: prefix,
         max_results: self.class.clamp_max_results(max_results),
-        continuation_token: continuation_token
+        continuation_token: continuation_token,
+        bulk_load: !!bulk_load
       )
     end
 
@@ -149,6 +154,32 @@ module Sprites
       raise e if e.message.start_with?("max_results must be")
 
       raise ArgumentError, "max_results must be an integer between #{LIST_MAX_RESULTS_MIN} and #{LIST_MAX_RESULTS_MAX}"
+    end
+  end
+
+  # GET /v1/sprites 的 NDJSON state event。
+  SpriteStateEvent = Data.define(
+    :type, :name, :status, :running_version, :last_running_at,
+    :last_warming_at, :timestamp, :organization
+  ) do
+    def initialize(type: nil, name: nil, status: nil, running_version: nil,
+                   last_running_at: nil, last_warming_at: nil, timestamp: nil,
+                   organization: nil)
+      super
+    end
+
+    def self.from_hash(hash)
+      org = hash["org"] || hash["organization"] || {}
+      new(
+        type: hash["type"],
+        name: hash["name"],
+        status: hash["status"],
+        running_version: hash["running_version"],
+        last_running_at: hash["last_running_at"] ? Time.parse(hash["last_running_at"]) : nil,
+        last_warming_at: hash["last_warming_at"] ? Time.parse(hash["last_warming_at"]) : nil,
+        timestamp: hash["timestamp"] ? Time.parse(hash["timestamp"]) : nil,
+        organization: OrgInfo.from_hash(org)
+      )
     end
   end
 
@@ -204,10 +235,36 @@ module Sprites
     end
   end
 
+  ExecResult = Data.define(:stdout, :stderr, :exit_code)
+
+  RestartSpriteResult = Data.define(:sprite_name, :machine_id, :message) do
+    def self.from_hash(hash)
+      new(
+        sprite_name: hash["sprite_name"],
+        machine_id: hash["machine_id"],
+        message: hash["message"]
+      )
+    end
+  end
+
+  SpriteCheck = Data.define(:sprite_name, :sprite_id, :status, :reason, :checked_at, :elapsed) do
+    def self.from_hash(hash)
+      new(
+        sprite_name: hash["sprite_name"],
+        sprite_id: hash["sprite_id"],
+        status: hash["status"],
+        reason: hash["reason"],
+        checked_at: hash["checked_at"] ? Time.parse(hash["checked_at"]) : nil,
+        elapsed: hash["elapsed"]
+      )
+    end
+  end
+
   # 检查点（snapshot）。list/get 对齐官方字段；create 流终态不解析文本，
   # 调用方用 exact comment 再 list/get 解析唯一结果。
-  Checkpoint = Data.define(:id, :create_time, :source_id, :comment, :health, :is_auto) do
-    def initialize(id: nil, create_time: nil, source_id: nil, comment: nil, health: nil, is_auto: false)
+  Checkpoint = Data.define(:id, :create_time, :source_id, :comment, :history, :health, :is_auto) do
+    def initialize(id: nil, create_time: nil, source_id: nil, comment: nil,
+                   history: nil, health: nil, is_auto: false)
       super
     end
 
@@ -223,6 +280,7 @@ module Sprites
         create_time: hash["create_time"] ? Time.parse(hash["create_time"]) : nil,
         source_id: hash["source_id"],
         comment: hash["comment"],
+        history: hash["history"],
         health: hash["health"],
         is_auto: hash["is_auto"] || false
       )
@@ -330,10 +388,31 @@ module Sprites
     end
   end
 
+  PortList = Data.define(:type, :ports) do
+    def self.from_hash(hash)
+      new(
+        type: hash["type"],
+        ports: Array(hash["ports"]).map { |port| PortNotificationMessage.from_hash(port) }
+      )
+    end
+  end
+
+  SessionKillEvent = Data.define(:type, :message, :signal, :pid, :exit_code) do
+    def self.from_hash(hash)
+      new(
+        type: hash["type"],
+        message: hash["message"],
+        signal: hash["signal"],
+        pid: hash["pid"],
+        exit_code: hash["exit_code"]
+      )
+    end
+  end
+
   # 服务定义
   Service = Data.define(:name, :cmd, :args, :env, :dir, :needs, :http_port) do
-    def initialize(name: nil, cmd: nil, args: nil, env: nil, dir: nil, needs: nil, http_port: nil)
-      super
+    def initialize(name: nil, cmd: nil, args: [], env: nil, dir: nil, needs: [], http_port: nil)
+      super(name:, cmd:, args: args || [], env:, dir:, needs: needs || [], http_port:)
     end
 
     def self.from_hash(hash)
@@ -376,8 +455,8 @@ module Sprites
 
   # 服务定义 + 运行时状态的组合
   ServiceWithState = Data.define(:name, :cmd, :args, :env, :dir, :needs, :http_port, :state) do
-    def initialize(name: nil, cmd: nil, args: nil, env: nil, dir: nil, needs: nil, http_port: nil, state: nil)
-      super
+    def initialize(name: nil, cmd: nil, args: [], env: nil, dir: nil, needs: [], http_port: nil, state: nil)
+      super(name:, cmd:, args: args || [], env:, dir:, needs: needs || [], http_port:, state:)
     end
 
     def self.from_hash(hash)

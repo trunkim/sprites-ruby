@@ -1,62 +1,97 @@
 # frozen_string_literal: true
 
-# 流式响应读取器
-#
-# Checkpoint、Restore、Service 操作返回 NDJSON（每行一个 JSON）流。
-# 这些类提供逐条读取和批量处理的接口，支持 Enumerable。
-
 require "json"
 require "stringio"
 
 module Sprites
-  class CheckpointStream
-    def initialize(body)
+  # 单消费者 NDJSON stream 的公共实现。
+  #
+  # HTTP body 可以是真实增量 IO，也可以是测试/兼容路径中的 String。空行与单条
+  # malformed JSON 对齐官方 JS SDK 直接跳过；需要 terminal contract 的操作由
+  # CheckpointStream/RestoreStream#drain! 额外校验 complete。
+  class NDJSONStream
+    include Enumerable
+
+    def initialize(body, &mapper)
       @body = body.is_a?(String) ? StringIO.new(body) : body
+      @mapper = mapper || ->(data) { data }
       @done = false
+      @closed = false
     end
 
-    def next_message
-      return nil if @done
+    def next_item
+      return if @done
 
       loop do
         line = @body.gets
         unless line
           @done = true
-          return nil
+          return
         end
 
         line = line.strip
         next if line.empty?
 
-        return StreamMessage.from_hash(JSON.parse(line))
+        begin
+          return @mapper.call(JSON.parse(line))
+        rescue JSON::ParserError
+          next
+        end
       end
-    rescue JSON::ParserError => e
-      raise Error, "failed to parse message: #{e.message}"
+    rescue Sprites::Error
+      raise
+    rescue StandardError => e
+      raise Error, "stream read failed: #{e.class}: #{e.message}"
+    end
+
+    def process_all
+      return enum_for(:process_all) unless block_given?
+
+      begin
+        while (item = next_item)
+          yield item
+        end
+        nil
+      ensure
+        close
+      end
+    end
+
+    def each(&block)
+      return enum_for(:each) unless block
+
+      process_all(&block)
     end
 
     def close
-      @body&.close rescue nil
+      return if @closed
+
+      @closed = true
+      @done = true
+      @body&.close
+      nil
+    rescue IOError, SystemCallError
+      nil
     end
 
-    def process_all(&block)
-      loop do
-        msg = next_message
-        break unless msg
+    def closed? = @closed
+  end
 
-        yield msg
-      end
-    ensure
-      close
+  class CheckpointStream < NDJSONStream
+    def initialize(body)
+      super(body) { |data| StreamMessage.from_hash(data) }
     end
+
+    alias next_message next_item
 
     # 消费全部消息并校验终态：遇到 error 立即失败；必须以 complete 结束。
     def drain!
       saw_complete = false
-      process_all do |msg|
-        case msg.type.to_s
+      process_all do |message|
+        case message.type.to_s
         when "error"
-          detail = msg.error.to_s
-          detail = msg.data.to_s if detail.empty?
+          detail = message.error.to_s
+          detail = message.data.to_s if detail.empty?
           raise Error, detail.empty? ? "checkpoint stream error" : detail
         when "complete"
           saw_complete = true
@@ -64,61 +99,16 @@ module Sprites
       end
       raise Error, "checkpoint stream ended without complete" unless saw_complete
     end
-
-    include Enumerable
-
-    def each(&block)
-      process_all(&block)
-    end
   end
 
-  class RestoreStream
-    def initialize(body)
-      @body = body.is_a?(String) ? StringIO.new(body) : body
-      @done = false
-    end
-
-    def next_message
-      return nil if @done
-
-      loop do
-        line = @body.gets
-        unless line
-          @done = true
-          return nil
-        end
-
-        line = line.strip
-        next if line.empty?
-
-        return StreamMessage.from_hash(JSON.parse(line))
-      end
-    rescue JSON::ParserError => e
-      raise Error, "failed to parse message: #{e.message}"
-    end
-
-    def close
-      @body&.close rescue nil
-    end
-
-    def process_all(&block)
-      loop do
-        msg = next_message
-        break unless msg
-
-        yield msg
-      end
-    ensure
-      close
-    end
-
+  class RestoreStream < CheckpointStream
     def drain!
       saw_complete = false
-      process_all do |msg|
-        case msg.type.to_s
+      process_all do |message|
+        case message.type.to_s
         when "error"
-          detail = msg.error.to_s
-          detail = msg.data.to_s if detail.empty?
+          detail = message.error.to_s
+          detail = message.data.to_s if detail.empty?
           raise Error, detail.empty? ? "restore stream error" : detail
         when "complete"
           saw_complete = true
@@ -126,58 +116,21 @@ module Sprites
       end
       raise Error, "restore stream ended without complete" unless saw_complete
     end
-
-    include Enumerable
-
-    def each(&block)
-      process_all(&block)
-    end
   end
 
-  class ServiceStream
+  class ServiceStream < NDJSONStream
     def initialize(body)
-      @body = body.is_a?(String) ? StringIO.new(body) : body
-      @done = false
+      super(body) { |data| ServiceLogEvent.from_hash(data) }
     end
 
-    def next_event
-      return nil if @done
+    alias next_event next_item
+  end
 
-      loop do
-        line = @body.gets
-        unless line
-          @done = true
-          return nil
-        end
-
-        line = line.strip
-        next if line.empty?
-
-        return ServiceLogEvent.from_hash(JSON.parse(line))
-      end
-    rescue JSON::ParserError => e
-      raise Error, "failed to parse service log event: #{e.message}"
+  class SpriteStateStream < NDJSONStream
+    def initialize(body)
+      super(body) { |data| SpriteStateEvent.from_hash(data) }
     end
 
-    def close
-      @body&.close rescue nil
-    end
-
-    def process_all(&block)
-      loop do
-        event = next_event
-        break unless event
-
-        yield event
-      end
-    ensure
-      close
-    end
-
-    include Enumerable
-
-    def each(&block)
-      process_all(&block)
-    end
+    alias next_event next_item
   end
 end

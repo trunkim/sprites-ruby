@@ -12,13 +12,13 @@ require "json"
 module Sprites
   module Policy
     def get_network_policy(sprite_name)
-      resp = http_get("/v1/sprites/#{sprite_name}/policy/network")
+      resp = http_get(Routes.policy(sprite_name, "network"))
       data = parse_response!(resp)
       NetworkPolicy.from_hash(data)
     end
 
     def update_network_policy(sprite_name, policy)
-      resp = http_post("/v1/sprites/#{sprite_name}/policy/network", policy.to_h)
+      resp = http_post(Routes.policy(sprite_name, "network"), policy.to_h)
 
       case resp.code.to_i
       when 204 then nil
@@ -33,14 +33,14 @@ module Sprites
     end
 
     def get_privileges_policy(sprite_name)
-      resp = http_get("/v1/sprites/#{sprite_name}/policy/privileges")
+      resp = http_get(Routes.policy(sprite_name, "privileges"))
       data = parse_response!(resp)
       PrivilegesPolicy.from_hash(data)
     end
 
     def update_privileges_policy(sprite_name, policy)
       body = policy.respond_to?(:to_h) ? policy.to_h : policy
-      resp = http_post("/v1/sprites/#{sprite_name}/policy/privileges", body)
+      resp = http_post(Routes.policy(sprite_name, "privileges"), body)
 
       case resp.code.to_i
       when 204 then nil
@@ -55,7 +55,7 @@ module Sprites
     end
 
     def delete_privileges_policy(sprite_name)
-      resp = http_delete("/v1/sprites/#{sprite_name}/policy/privileges")
+      resp = http_delete(Routes.policy(sprite_name, "privileges"))
 
       case resp.code.to_i
       when 200, 204 then nil
@@ -65,14 +65,14 @@ module Sprites
     end
 
     def get_resources_policy(sprite_name)
-      resp = http_get("/v1/sprites/#{sprite_name}/policy/resources")
+      resp = http_get(Routes.policy(sprite_name, "resources"))
       data = parse_response!(resp)
       ResourcesPolicy.from_hash(data)
     end
 
     def update_resources_policy(sprite_name, policy)
       body = policy.respond_to?(:to_h) ? policy.to_h : policy
-      resp = http_post("/v1/sprites/#{sprite_name}/policy/resources", body)
+      resp = http_post(Routes.policy(sprite_name, "resources"), body)
 
       case resp.code.to_i
       when 204 then nil
@@ -87,7 +87,7 @@ module Sprites
     end
 
     def delete_resources_policy(sprite_name)
-      resp = http_delete("/v1/sprites/#{sprite_name}/policy/resources")
+      resp = http_delete(Routes.policy(sprite_name, "resources"))
 
       case resp.code.to_i
       when 200, 204 then nil

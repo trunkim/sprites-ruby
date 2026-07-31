@@ -13,22 +13,27 @@ require "net/http"
 module Sprites
   module Management
     # @param wait_for_capacity [Boolean] 官方 create body 字段；默认 true
-    def create_sprite(name, config: nil, org: nil, labels: nil, wait_for_capacity: true)
+    def create_sprite(name, config: nil, environment: nil, url_settings: nil,
+                      org: nil, labels: nil, wait_for_capacity: true, runtime: nil)
       body = { name: name }
       body[:config] = config.to_h if config
+      body[:environment] = environment if environment
+      body[:url_settings] = url_settings.to_h if url_settings
       body[:labels] = labels if labels
       body[:wait_for_capacity] = wait_for_capacity unless wait_for_capacity.nil?
+      body[:runtime] = runtime if runtime
 
-      resp = http_post("/v1/sprites", body)
-      data = parse_response!(resp, expected: 201)
+      resp = http_post(Routes.sprites, body)
+      data = parse_response!(resp, expected: [200, 201])
+      data["name"] ||= name
 
-      sprite = Sprite.new(name: data["name"] || name, client: self, org: org)
-      sprite.status = "created"
+      sprite = Sprite.from_info(SpriteInfo.from_hash(data), client: self, org: org)
+      sprite.status ||= "created"
       sprite
     end
 
     def get_sprite(name, org: nil)
-      resp = http_get("/v1/sprites/#{name}")
+      resp = http_get(Routes.sprite(name))
 
       if resp.code.to_i == 404
         api_err = APIError.parse(resp, resp.body)
@@ -53,12 +58,22 @@ module Sprites
       params["max_results"] = opts.max_results.to_s if opts.max_results && opts.max_results > 0
       params["continuation_token"] = opts.continuation_token if opts.continuation_token
       params["prefix"] = opts.prefix if opts.prefix
+      params["bulk_load"] = "true" if opts.bulk_load
 
-      resp = http_get("/v1/sprites", params: params)
+      resp = http_get(Routes.sprites, params: params)
       data = parse_response!(resp)
 
       sprites = (data["sprites"] || []).map { |s| SpriteInfo.from_hash(s) }
-      org_info = OrgInfo.from_hash(data["org"])
+      org_info = OrgInfo.from_hash(
+        data["org"] || {
+          "name" => data["name"],
+          "running" => data["running"],
+          "warm" => data["warm"],
+          "cold" => data["cold"],
+          "running_limit" => data["running_limit"],
+          "warm_limit" => data["warm_limit"]
+        }
+      )
 
       {
         sprites: sprites,
@@ -66,6 +81,18 @@ module Sprites
         has_more: data["has_more"] || false,
         next_continuation_token: data["next_continuation_token"]
       }
+    end
+
+    def watch_sprites(prefix: nil, max_results: nil)
+      params = {}
+      params["prefix"] = prefix if prefix
+      params["max_results"] = ListOptions.clamp_max_results(max_results).to_s if max_results
+      response = http_get_stream(
+        Routes.sprites,
+        params: params,
+        headers: { "Accept" => "application/x-ndjson" }
+      )
+      SpriteStateStream.new(parse_stream_response!(response))
     end
 
     ListResult = Data.define(:sprites, :org) do
@@ -107,7 +134,7 @@ module Sprites
     end
 
     def delete_sprite(name)
-      resp = http_delete("/v1/sprites/#{name}")
+      resp = http_delete(Routes.sprite(name))
       return if [200, 204].include?(resp.code.to_i)
 
       parse_response!(resp)
@@ -116,26 +143,37 @@ module Sprites
     alias destroy_sprite delete_sprite
 
     def upgrade_sprite(name)
-      resp = http_post("/v1/sprites/#{name}/upgrade", nil)
+      resp = http_post("#{Routes.sprite(name)}/upgrade", nil)
       return if [200, 204].include?(resp.code.to_i)
 
       parse_response!(resp)
     end
 
+    def restart_sprite(name)
+      resp = http_post("#{Routes.sprite(name)}/restart", nil)
+      RestartSpriteResult.from_hash(parse_response!(resp, expected: [200, 202]))
+    end
+
+    def check_sprite(name)
+      resp = http_get("#{Routes.sprite(name)}/check")
+      SpriteCheck.from_hash(parse_response!(resp))
+    end
+
     def update_url_settings(sprite_name, settings)
-      body = { url_settings: settings.to_h }
-      resp = http_put("/v1/sprites/#{sprite_name}", body)
-      parse_response!(resp)
+      update_sprite(sprite_name, url_settings: settings)
     end
 
     def update_sprite(sprite_name, url_settings: nil, labels: nil, clear_labels: false)
       body = {}
       body[:url_settings] = url_settings.to_h if url_settings
       body[:labels] = labels if labels
-      body[:clear_labels] = clear_labels if clear_labels
+      body[:labels] = [] if clear_labels
+      raise ArgumentError, "url_settings or labels is required" if body.empty?
 
-      resp = http_put("/v1/sprites/#{sprite_name}", body)
-      parse_response!(resp)
+      resp = http_put(Routes.sprite(sprite_name), body)
+      data = parse_response!(resp)
+      data["name"] ||= sprite_name
+      Sprite.from_info(SpriteInfo.from_hash(data), client: self)
     end
   end
 end

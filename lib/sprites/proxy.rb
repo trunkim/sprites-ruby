@@ -62,8 +62,7 @@ module Sprites
     end
 
     def build_proxy_url(sprite_name)
-      base = @base_url.sub(/\Ahttp/, "ws")
-      "#{base}/v1/sprites/#{sprite_name}/proxy"
+      Routes.websocket_uri(@base_url, Routes.proxy(sprite_name)).to_s
     end
 
     def init_socket_tcp(ws_conn, addr)

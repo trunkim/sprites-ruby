@@ -4,6 +4,10 @@ require "json"
 require "uri"
 require "net/http"
 require "openssl"
+require "socket"
+require "io/wait"
+require "base64"
+require "digest/sha1"
 
 module Sprites
   # ── WebSocket 二进制帧中的流 ID 常量 ──
@@ -95,6 +99,11 @@ module Sprites
   #   type, data = ws.read_message  #=> [:text, "world"]
   #   ws.close
   class WebSocketConnection
+    WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+    MAX_HANDSHAKE_LINE_BYTES = 8 * 1024
+    MAX_HANDSHAKE_BYTES = 64 * 1024
+    MAX_FRAME_PAYLOAD_BYTES = 16 * 1024 * 1024
+
     attr_reader :socket, :capabilities, :response_headers
 
     def initialize(uri, headers: {}, timeout: 30)
@@ -103,6 +112,7 @@ module Sprites
       @timeout = timeout
       @read_mutex = Mutex.new
       @write_mutex = Mutex.new
+      @state_mutex = Mutex.new
       @closed = false
       @capabilities = {}
       @response_headers = {}
@@ -115,6 +125,9 @@ module Sprites
       perform_handshake
       parse_capabilities
       self
+    rescue StandardError
+      close_socket
+      raise
     end
 
     # 发送文本帧（opcode 0x01）
@@ -142,7 +155,7 @@ module Sprites
     # @return [Array(Symbol, String), nil] [:text, data] / [:binary, data] / [:close, data] / nil
     def read_message
       @read_mutex.synchronize do
-        return nil if @closed
+        return nil if closed?
 
         read_frame
       end
@@ -150,31 +163,46 @@ module Sprites
 
     # 优雅关闭：发送 close 帧后关闭 socket
     def close
-      return if @closed
+      @write_mutex.synchronize do
+        return if closed?
 
-      @closed = true
-      write_close rescue nil
-      @socket&.close rescue nil
+        begin
+          write_frame_unlocked(0x08, [1000].pack("n"))
+        rescue IOError, SystemCallError, OpenSSL::SSL::SSLError
+          nil
+        ensure
+          mark_closed
+        end
+      end
+      close_socket
     end
 
     def closed?
-      @closed
+      @state_mutex.synchronize { @closed }
     end
 
     private
 
     # 创建底层 socket（TCP 或 TLS-wrapped）
     def create_socket
-      tcp = TCPSocket.new(@uri.host, @uri.port || (@uri.scheme == "wss" ? 443 : 80))
+      port = @uri.port || (@uri.scheme == "wss" ? 443 : 80)
+      tcp = Socket.tcp(
+        @uri.host,
+        port,
+        connect_timeout: @timeout,
+        resolv_timeout: @timeout
+      )
       tcp.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1)
+      tcp.setsockopt(Socket::SOL_SOCKET, Socket::SO_KEEPALIVE, 1)
 
       if @uri.scheme == "wss"
         ctx = OpenSSL::SSL::SSLContext.new
         # set_params 会自动加载系统 CA 证书
         ctx.set_params(verify_mode: OpenSSL::SSL::VERIFY_PEER)
         ssl = OpenSSL::SSL::SSLSocket.new(tcp, ctx)
+        ssl.sync_close = true
         ssl.hostname = @uri.host
-        ssl.connect
+        connect_ssl(ssl)
         ssl
       else
         tcp
@@ -195,44 +223,57 @@ module Sprites
       @headers.each { |k, v| request += "#{k}: #{v}\r\n" }
       request += "\r\n"
 
-      @socket.write(request)
+      deadline = monotonic_now + @timeout
+      write_all(request, deadline: deadline)
 
       # 读取 HTTP 响应头
       response = ""
       loop do
-        line = read_line
+        line = read_line(deadline: deadline)
         response += line
+        raise Error, "WebSocket handshake headers too large" if response.bytesize > MAX_HANDSHAKE_BYTES
         break if line == "\r\n"
       end
 
-      unless response.include?("101")
-        status_match = response.match(/HTTP\/\d\.\d (\d+)/)
-        status = status_match ? status_match[1] : "unknown"
+      lines = response.split("\r\n")
+      status_match = lines.shift&.match(/\AHTTP\/\d(?:\.\d)?\s+(\d{3})(?:\s|\z)/)
+      status = status_match&.[](1)
+      unless status == "101"
         raise Error, "WebSocket handshake failed (HTTP #{status})"
       end
 
-      # 解析响应头
-      response.split("\r\n").each do |line|
+      lines.each do |line|
         if (m = line.match(/\A([^:]+):\s*(.*)\z/))
-          @response_headers[m[1]] = m[2]
+          @response_headers[m[1].downcase] = m[2]
         end
+      end
+
+      unless @response_headers["upgrade"].to_s.casecmp?("websocket") &&
+             @response_headers["connection"].to_s.split(",").any? { |token| token.strip.casecmp?("upgrade") }
+        raise Error, "WebSocket handshake missing upgrade headers"
+      end
+
+      expected_accept = Base64.strict_encode64(Digest::SHA1.digest("#{key}#{WEBSOCKET_GUID}"))
+      unless secure_compare(@response_headers["sec-websocket-accept"].to_s, expected_accept)
+        raise Error, "WebSocket handshake has invalid Sec-WebSocket-Accept"
       end
     end
 
     # 从 X-Sprite-Capabilities 头解析服务端能力（如 signal）
     def parse_capabilities
-      if (caps = @response_headers["X-Sprite-Capabilities"])
+      if (caps = @response_headers["x-sprite-capabilities"])
         caps.split(",").each { |c| @capabilities[c.strip] = true }
       end
     end
 
-    def read_line
+    def read_line(deadline: nil)
       line = +""
       loop do
-        ch = @socket.read(1)
+        ch = read_exact(1, deadline: deadline)
         raise Error, "Connection closed during handshake" unless ch
 
         line << ch
+        raise Error, "WebSocket handshake line too large" if line.bytesize > MAX_HANDSHAKE_LINE_BYTES
         break if line.end_with?("\n")
       end
       line
@@ -241,79 +282,210 @@ module Sprites
     # 写入一个 WebSocket 帧（客户端帧必须 mask）
     def write_frame(opcode, payload)
       @write_mutex.synchronize do
-        return if @closed
+        return if closed?
 
-        frame = +""
-        # FIN=1 | opcode
-        frame << [0x80 | opcode].pack("C")
-
-        mask_key = SecureRandom.random_bytes(4)
-        len = payload.bytesize
-
-        # 编码 payload 长度 + MASK 位
-        if len < 126
-          frame << [0x80 | len].pack("C")
-        elsif len < 65536
-          frame << [0x80 | 126, len].pack("Cn")
-        else
-          frame << [0x80 | 127, len].pack("CQ>")
-        end
-
-        # mask key + masked payload
-        frame << mask_key
-        masked = payload.bytes.each_with_index.map { |b, i| b ^ mask_key.bytes[i % 4] }.pack("C*")
-        frame << masked
-
-        @socket.write(frame)
+        write_frame_unlocked(opcode, payload)
       end
     end
 
-    # 读取一个 WebSocket 帧，自动处理 ping/pong
-    def read_frame
-      first_byte = @socket.read(1)
-      return nil unless first_byte
+    def write_frame_unlocked(opcode, payload)
+      payload = payload.b
+      raise Error, "WebSocket frame exceeds #{MAX_FRAME_PAYLOAD_BYTES} bytes" if payload.bytesize > MAX_FRAME_PAYLOAD_BYTES
 
-      first = first_byte.unpack1("C")
-      opcode = first & 0x0F
-
-      second = @socket.read(1).unpack1("C")
-      masked = (second & 0x80) != 0
-      len = second & 0x7F
-
-      # 扩展长度
-      if len == 126
-        len = @socket.read(2).unpack1("n")
-      elsif len == 127
-        len = @socket.read(8).unpack1("Q>")
-      end
-
-      mask_key = masked ? @socket.read(4) : nil
-      payload = len > 0 ? @socket.read(len) : +""
-
-      # 服务端帧可能也带 mask（虽然不常见）
-      if masked && mask_key && payload
-        payload = payload.bytes.each_with_index.map { |b, i| b ^ mask_key.bytes[i % 4] }.pack("C*")
-      end
-
-      case opcode
-      when 0x01 # text
-        [:text, payload.force_encoding("utf-8")]
-      when 0x02 # binary
-        [:binary, payload]
-      when 0x08 # close
-        @closed = true
-        [:close, payload]
-      when 0x09 # ping — 自动回 pong
-        write_frame(0x0A, payload) rescue nil
-        read_frame
-      when 0x0A # pong — 忽略，继续读
-        read_frame
+      frame = +[0x80 | opcode].pack("C")
+      mask_key = SecureRandom.random_bytes(4)
+      length = payload.bytesize
+      if length < 126
+        frame << [0x80 | length].pack("C")
+      elsif length < 65_536
+        frame << [0x80 | 126, length].pack("Cn")
       else
-        read_frame
+        frame << [0x80 | 127, length].pack("CQ>")
       end
-    rescue IOError, Errno::ECONNRESET, OpenSSL::SSL::SSLError
-      @closed = true
+      frame << mask_key
+      frame << mask(payload, mask_key)
+      write_all(frame, deadline: monotonic_now + WS_WRITE_WAIT)
+    end
+
+    # 读取一个完整 WebSocket message，支持 fragmentation，并就地处理 control frames。
+    def read_frame
+      message_opcode = nil
+      message = +"".b
+
+      loop do
+        header = read_frame_header
+        return unless header
+
+        fin, opcode, length = header
+        payload = length.zero? ? +"".b : read_exact(length)
+        raise Error, "WebSocket frame truncated" unless payload&.bytesize == length
+
+        if opcode >= 0x08
+          raise Error, "fragmented WebSocket control frame" unless fin
+          raise Error, "WebSocket control frame exceeds 125 bytes" if length > 125
+
+          case opcode
+          when 0x08
+            write_frame(0x08, payload) unless closed?
+            mark_closed
+            close_socket
+            return [:close, payload]
+          when 0x09
+            write_frame(0x0A, payload)
+          when 0x0A
+            nil
+          else
+            raise Error, format("unsupported WebSocket control opcode 0x%02x", opcode)
+          end
+          next
+        end
+
+        case opcode
+        when 0x00
+          raise Error, "unexpected WebSocket continuation frame" unless message_opcode
+        when 0x01, 0x02
+          raise Error, "interleaved fragmented WebSocket message" if message_opcode
+          message_opcode = opcode
+        else
+          raise Error, format("unsupported WebSocket opcode 0x%02x", opcode)
+        end
+
+        message << payload
+        if message.bytesize > MAX_FRAME_PAYLOAD_BYTES
+          raise Error, "WebSocket message exceeds #{MAX_FRAME_PAYLOAD_BYTES} bytes"
+        end
+        next unless fin
+
+        if message_opcode == 0x01
+          text = message.force_encoding(Encoding::UTF_8)
+          raise Error, "WebSocket text frame is not valid UTF-8" unless text.valid_encoding?
+
+          return [:text, text]
+        end
+        return [:binary, message]
+      end
+    rescue IOError, EOFError, Errno::ECONNRESET, OpenSSL::SSL::SSLError
+      mark_closed
       nil
+    end
+
+    def read_frame_header
+      bytes = read_exact(2)
+      return unless bytes
+      raise Error, "WebSocket frame header truncated" unless bytes.bytesize == 2
+
+      first, second = bytes.unpack("CC")
+      raise Error, "WebSocket RSV bits are not supported" unless (first & 0x70).zero?
+      raise Error, "server WebSocket frames must not be masked" unless (second & 0x80).zero?
+
+      fin = (first & 0x80) != 0
+      opcode = first & 0x0F
+      length = second & 0x7F
+      if length == 126
+        extended = read_exact(2)
+        raise Error, "WebSocket frame length truncated" unless extended&.bytesize == 2
+        length = extended.unpack1("n")
+      elsif length == 127
+        extended = read_exact(8)
+        raise Error, "WebSocket frame length truncated" unless extended&.bytesize == 8
+        raise Error, "invalid WebSocket 64-bit frame length" unless (extended.getbyte(0) & 0x80).zero?
+        length = extended.unpack1("Q>")
+      end
+      raise Error, "WebSocket frame exceeds #{MAX_FRAME_PAYLOAD_BYTES} bytes" if length > MAX_FRAME_PAYLOAD_BYTES
+
+      [fin, opcode, length]
+    end
+
+    def connect_ssl(ssl)
+      deadline = monotonic_now + @timeout
+      loop do
+        result = ssl.connect_nonblock(exception: false)
+        return ssl if result.equal?(ssl)
+
+        case result
+        when :wait_readable
+          wait_for_io(ssl, :read, deadline: deadline, error_class: Net::OpenTimeout)
+        when :wait_writable
+          wait_for_io(ssl, :write, deadline: deadline, error_class: Net::OpenTimeout)
+        else
+          return ssl
+        end
+      end
+    end
+
+    def read_exact(length, deadline: nil)
+      buffer = String.new(capacity: length, encoding: Encoding::BINARY)
+      while buffer.bytesize < length
+        chunk = @socket.read_nonblock(length - buffer.bytesize, exception: false)
+        case chunk
+        when :wait_readable
+          wait_for_io(@socket, :read, deadline: deadline)
+        when :wait_writable
+          wait_for_io(@socket, :write, deadline: deadline)
+        when nil
+          return buffer.empty? ? nil : buffer
+        else
+          buffer << chunk
+        end
+      end
+      buffer
+    end
+
+    def write_all(data, deadline: nil)
+      offset = 0
+      while offset < data.bytesize
+        written = @socket.write_nonblock(data.byteslice(offset..), exception: false)
+        case written
+        when :wait_readable
+          wait_for_io(@socket, :read, deadline: deadline, error_class: Net::WriteTimeout)
+        when :wait_writable
+          wait_for_io(@socket, :write, deadline: deadline, error_class: Net::WriteTimeout)
+        else
+          offset += written
+        end
+      end
+      offset
+    end
+
+    def wait_for_io(io, direction, deadline:, error_class: Net::ReadTimeout)
+      timeout = deadline && deadline - monotonic_now
+      raise error_class, "WebSocket I/O timed out" if timeout && timeout <= 0
+
+      ready = direction == :read ? io.wait_readable(timeout) : io.wait_writable(timeout)
+      raise error_class, "WebSocket I/O timed out" unless ready
+    end
+
+    def mask(payload, key)
+      key_bytes = key.bytes
+      result = String.new(capacity: payload.bytesize, encoding: Encoding::BINARY)
+      payload.each_byte.with_index do |byte, index|
+        result << (byte ^ key_bytes[index & 3])
+      end
+      result
+    end
+
+    def secure_compare(actual, expected)
+      return false unless actual.bytesize == expected.bytesize
+
+      difference = 0
+      actual.bytes.zip(expected.bytes) { |left, right| difference |= left ^ right }
+      difference.zero?
+    end
+
+    def mark_closed
+      @state_mutex.synchronize { @closed = true }
+    end
+
+    def close_socket
+      @socket&.close unless @socket&.closed?
+    rescue IOError, SystemCallError, OpenSSL::SSL::SSLError
+      nil
+    ensure
+      mark_closed
+    end
+
+    def monotonic_now
+      Process.clock_gettime(Process::CLOCK_MONOTONIC)
     end
   end
 end
