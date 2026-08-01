@@ -4,6 +4,25 @@ module Sprites
   # SDK 基础异常类
   class Error < StandardError; end
 
+  # Provider 返回成功 HTTP status，但响应体不符合 SDK 声明的 JSON contract。
+  #
+  # 不保留原始 body，避免把凭证、用户数据或二进制污染带入日志；调用方仍可用
+  # 结构化元数据判断这是可观测性失败，而不是业务拒绝。
+  class ProtocolError < Error
+    attr_reader :status_code, :content_type, :body_bytes
+
+    def initialize(status_code:, content_type:, body_bytes:)
+      @status_code = Integer(status_code)
+      @content_type = content_type.to_s
+      @body_bytes = Integer(body_bytes)
+      rendered_content_type = @content_type.empty? ? "unknown" : @content_type
+      super(
+        "invalid JSON response " \
+          "(status #{@status_code}, content-type #{rendered_content_type}, bytes #{@body_bytes})"
+      )
+    end
+  end
+
   # 命令以非零退出码结束时抛出
   #
   # @example

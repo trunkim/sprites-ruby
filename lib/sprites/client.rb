@@ -508,6 +508,12 @@ module Sprites
       return nil if body.nil? || body.empty?
 
       JSON.parse(body)
+    rescue JSON::ParserError => error
+      raise ProtocolError.new(
+        status_code: code,
+        content_type: resp["Content-Type"],
+        body_bytes: body.bytesize
+      ), cause: error
     end
   end
 end

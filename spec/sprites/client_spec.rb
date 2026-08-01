@@ -164,5 +164,25 @@ RSpec.describe Sprites::Client do
 
       expect(fake.overlapped).to be false
     end
+
+    it "wraps an invalid successful JSON response as ProtocolError without retaining its body" do
+      response = Struct.new(:code, :body) do
+        def [](key) = key.to_s.casecmp?("content-type") ? "application/json" : nil
+      end.new("200", "\0not-json")
+      fake = Class.new do
+        def initialize(response) = @response = response
+        def request(_request) = @response
+      end.new(response)
+      client = described_class.new(token, http_client: fake)
+
+      error = nil
+      expect { client.list_sessions("demo") }
+        .to raise_error(Sprites::ProtocolError) { |raised| error = raised }
+
+      expect(error.status_code).to eq(200)
+      expect(error.content_type).to eq("application/json")
+      expect(error.body_bytes).to eq(9)
+      expect(error.message).not_to include("not-json")
+    end
   end
 end
