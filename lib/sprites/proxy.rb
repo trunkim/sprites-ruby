@@ -61,11 +61,10 @@ module Sprites
     def dial_proxy_websocket(sprite_name)
       ws_url = build_proxy_url(sprite_name)
 
-      headers = {
-        "Authorization" => "Bearer #{@token}",
-        "User-Agent" => "sprites-ruby-sdk/#{VERSION}",
+      headers = ClientSignals.auth_headers(
+        @token,
         "Sprite-Client-Features" => "control"
-      }
+      )
 
       WebSocketConnection.new(ws_url, headers: headers, timeout: 30).connect!
     end

@@ -37,7 +37,6 @@ module Sprites
 
       uri = Routes.uri(base_url, Routes.exec(sprite_name), params: params)
       request = Net::HTTP::Post.new(uri)
-      request["Authorization"] = "Bearer #{token}"
       request["Content-Type"] = "application/octet-stream"
       request.body = input.to_s.b unless input.nil?
 

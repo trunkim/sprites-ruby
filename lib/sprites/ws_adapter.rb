@@ -93,7 +93,7 @@ module Sprites
   #
   # @example
   #   ws = WebSocketConnection.new("wss://api.sprites.dev/v1/sprites/x/exec",
-  #     headers: { "Authorization" => "Bearer token" })
+  #     headers: ClientSignals.auth_headers("token"))
   #   ws.connect!
   #   ws.write_text("hello")
   #   type, data = ws.read_message  #=> [:text, "world"]

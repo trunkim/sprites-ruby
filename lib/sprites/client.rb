@@ -139,7 +139,6 @@ module Sprites
     def fetch_version(sprite_name)
       uri = Routes.uri(@base_url, Routes.exec(sprite_name))
       req = Net::HTTP::Head.new(uri)
-      req["Authorization"] = "Bearer #{@token}"
 
       resp = request(uri, req)
       capture_version(resp)
@@ -169,7 +168,6 @@ module Sprites
         params: { signal: signal, timeout: "0s" }
       )
       req = Net::HTTP::Post.new(uri)
-      req["Authorization"] = "Bearer #{@token}"
 
       resp = request(uri, req)
       return if resp.code.to_i == 410  # Gone — session 已退出
@@ -238,6 +236,7 @@ module Sprites
 
     # 公开 HTTP 入口，供 filesystem 等模块复用同一 transport
     def request(uri, req, read_timeout: nil, open_timeout: nil, write_timeout: nil)
+      apply_authenticated_headers!(req)
       perform_request(
         uri,
         req,
@@ -250,6 +249,7 @@ module Sprites
     # 在调用线程内消费 streaming response；block 返回前连接不会归还池。
     def request_stream(uri, req, read_timeout: nil, open_timeout: nil, write_timeout: nil, &block)
       raise ArgumentError, "block is required" unless block
+      apply_authenticated_headers!(req)
 
       if @owns_http_client
         return @http_transport.request_stream(
@@ -375,7 +375,6 @@ module Sprites
       uri.query = URI.encode_www_form(params) unless params.empty?
 
       req = Net::HTTP::Get.new(uri)
-      req["Authorization"] = "Bearer #{@token}"
 
       request(uri, req, read_timeout: read_timeout, open_timeout: open_timeout)
     end
@@ -384,7 +383,6 @@ module Sprites
       uri = URI("#{@base_url}#{path}")
 
       req = Net::HTTP::Post.new(uri)
-      req["Authorization"] = "Bearer #{@token}"
       req["Content-Type"] = "application/json"
       req.body = JSON.generate(body) if body
 
@@ -395,7 +393,6 @@ module Sprites
       uri = URI("#{@base_url}#{path}")
 
       req = Net::HTTP::Put.new(uri)
-      req["Authorization"] = "Bearer #{@token}"
       req["Content-Type"] = "application/json"
       req.body = JSON.generate(body) if body
 
@@ -406,7 +403,6 @@ module Sprites
       uri = URI("#{@base_url}#{path}")
 
       req = Net::HTTP::Delete.new(uri)
-      req["Authorization"] = "Bearer #{@token}"
 
       request(uri, req)
     end
@@ -415,7 +411,6 @@ module Sprites
       uri = Routes.uri(@base_url, path, params: params)
 
       req = Net::HTTP::Get.new(uri)
-      req["Authorization"] = "Bearer #{@token}"
       headers.each { |name, value| req[name] = value }
 
       stream_request(uri, req)
@@ -426,7 +421,6 @@ module Sprites
       uri = Routes.uri(@base_url, path, params: params)
 
       req = Net::HTTP::Post.new(uri)
-      req["Authorization"] = "Bearer #{@token}"
       req["Content-Type"] = "application/json" if json
       req.body = JSON.generate(body) if body
 
@@ -438,7 +432,6 @@ module Sprites
       uri = Routes.uri(@base_url, path, params: params)
 
       req = Net::HTTP::Put.new(uri)
-      req["Authorization"] = "Bearer #{@token}"
       req["Content-Type"] = "application/json"
       req.body = JSON.generate(body) if body
 
@@ -446,6 +439,7 @@ module Sprites
     end
 
     def stream_request(uri, req)
+      apply_authenticated_headers!(req)
       response = HTTPStreamResponse.new(
         uri: uri,
         request: req,
@@ -463,7 +457,7 @@ module Sprites
       stream = nil
       connection = WebSocketConnection.new(
         Routes.websocket_uri(@base_url, path).to_s,
-        headers: { "Authorization" => "Bearer #{@token}" },
+        headers: ClientSignals.auth_headers(@token),
         timeout: @http_timeout
       )
       stream = stream_class.new(
@@ -514,6 +508,11 @@ module Sprites
         content_type: resp["Content-Type"],
         body_bytes: body.bytesize
       ), cause: error
+    end
+
+    def apply_authenticated_headers!(request)
+      ClientSignals.auth_headers(@token).each { |name, value| request[name] = value }
+      request
     end
   end
 end

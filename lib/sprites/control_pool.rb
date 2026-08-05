@@ -283,10 +283,7 @@ module Sprites
     def dial(_ctx = nil)
       url = build_control_url
 
-      headers = {
-        "Authorization" => "Bearer #{@client.token}",
-        "User-Agent" => "sprites-ruby-sdk/#{VERSION}"
-      }
+      headers = ClientSignals.auth_headers(@client.token)
 
       ws = WebSocketConnection.new(url, headers: headers, timeout: DIAL_TIMEOUT).connect!
       conn = ControlConn.new(ws)

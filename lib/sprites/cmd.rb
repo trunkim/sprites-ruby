@@ -141,7 +141,7 @@ module Sprites
 
       # 构建 WebSocket URL 并创建底层命令执行器
       ws_url = build_websocket_url
-      headers = { "Authorization" => "Bearer #{@sprite.client.token}" }
+      headers = ClientSignals.auth_headers(@sprite.client.token)
 
       cmd_args = @args.length > 1 ? @args[1..] : []
       @ws_cmd = WsCmd.new(url: ws_url, headers: headers, name: @path, args: cmd_args)

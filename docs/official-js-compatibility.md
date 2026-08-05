@@ -3,10 +3,10 @@
 ## 审计基线
 
 - 官方仓库：<https://github.com/superfly/sprites-js>
-- revision：`9dbffa1b9a3f9705b6ef6be17437b34fa317056b`
-- revision 时间：2026-07-22 11:30:48 -0500
-- revision 标题：`Merge pull request #19 from superfly/alex/complete-sdk-surface`
-- 官方测试：Node 24.14.0 下 68 tests、0 failures；需要 provider token 的 integration tests 未在官方仓库内执行。
+- revision：`7aa6fab826b3ae373ac0da6c6a5479ad7d197744`（tag `v0.2.0`）
+- revision 时间：2026-08-05 10:03:08 -0500
+- revision 标题：`Merge pull request #23 from superfly/alex/add-client-attribution`
+- 官方测试：`npm test` 为 106 tests、0 failures；需要 provider token 的 integration tests 未执行。
 
 本文件固定 wire contract 基线，不要求 Ruby 复制 JavaScript 的 Promise、EventEmitter
 或命名风格。Ruby API 保持同步、Enumerable 与 `snake_case`，但 endpoint、字段、终态、
@@ -27,6 +27,7 @@
 | filesystem read/write/readdir/mkdir/rm/stat/rename/copy/chmod/exists/chown/watch/append/JSON | `SpriteFS` 对应 Ruby 方法 | `filesystem_spec.rb`、`watch_spec.rb` |
 | proxy socket/port/ports | `proxy_socket`、`proxy_port`、`proxy_ports` | `proxy_spec.rb` |
 | control connection | Ruby 作为内部 bounded pool，供 Cmd 与 filesystem control 复用，不暴露 JS EventEmitter API | `control_pool_spec.rb`、`filesystem_control_spec.rb` |
+| client attribution | `ClientSignals` 统一构造 REST/WS headers；credential exchange 明确排除 | `client_signals_spec.rb`、`attribution_spec.rb` |
 
 `public_surface_spec.rb` 是可执行的 surface 清单；表格新增能力时必须同步新增 wire/lifecycle
 测试，不能只补 `respond_to?`。
@@ -45,6 +46,21 @@
 6. `Client#close` 是本 client 的 connection scope：关闭 active direct command、HTTP stream、
    watcher、proxy、control pool 与 HTTP pool；不关闭其他 Client 或 sibling command。
 7. provider/API error 优先解析为 `APIError`，保留 status、error code、rate limit 与 retry headers。
+8. 所有 authenticated REST、incremental HTTP stream 与 WebSocket handshake 必须经过
+   `ClientSignals`；任何模块不得自行拼 `Bearer`、`Fly-Client-*` 或 SDK `User-Agent`。
+
+## Filesystem wire 证据
+
+`dev-latest` 文档与当前官方 SDK 在 filesystem 的两个字段上存在漂移：文档曾把父目录参数
+写成 `mkdir`，并把 delete 描述为 JSON body；当前官方 JS SDK 与真实 API 使用
+`mkdirParents=true`，delete 使用 `path`、`workingDir`、`recursive`、`asRoot` query parameters。
+
+因此 Ruby 的稳定 contract 由三层证据共同锁定：
+
+1. `filesystem_spec.rb` 固定 Ruby SDK wire；
+2. `live_api_contract_spec.rb` 对真实 provider 做 opt-in canary；
+3. Gateway 的 `filesystem_sdk_contract_test.rb` 比较应用 raw streaming adapter 与本 SDK
+   的归一化请求，禁止应用再次维护另一份字段清单。
 
 ## HTTP exec 的协议限制
 
@@ -61,6 +77,11 @@
 
 ```bash
 rvm ruby-4.0.6 do bundle exec rspec
+
+SPRITES_LIVE_API=1 \
+SPRITES_LIVE_TOKEN=... \
+SPRITES_LIVE_NAME=... \
+rvm ruby-4.0.6 do bundle exec rspec spec/sprites/live_api_contract_spec.rb
 ```
 
 `real_http_integration_spec.rb` 必须使用原生 Net::HTTP；测试会临时卸载 WebMock adapter，

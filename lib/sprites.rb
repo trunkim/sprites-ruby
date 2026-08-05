@@ -17,6 +17,7 @@
 # @see Sprites::Cmd
 
 require_relative "sprites/version"
+require_relative "sprites/client_signals"
 require_relative "sprites/debug"
 require_relative "sprites/errors"
 require_relative "sprites/types"

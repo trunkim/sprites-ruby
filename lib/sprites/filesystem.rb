@@ -176,7 +176,6 @@ module Sprites
       uri = Routes.uri(base_url, path, params: params)
 
       req = Net::HTTP::Get.new(uri)
-      req["Authorization"] = "Bearer #{@sprite.client.token}"
 
       perform_request(uri, req)
     end
@@ -185,7 +184,6 @@ module Sprites
       uri = Routes.uri(base_url, path, params: params)
 
       req = Net::HTTP::Delete.new(uri)
-      req["Authorization"] = "Bearer #{@sprite.client.token}"
 
       perform_request(uri, req)
     end
@@ -194,7 +192,6 @@ module Sprites
       uri = Routes.uri(base_url, path, params: params)
 
       req = Net::HTTP::Put.new(uri)
-      req["Authorization"] = "Bearer #{@sprite.client.token}"
       req["Content-Type"] = "application/octet-stream"
       req.body = data
 
@@ -205,7 +202,6 @@ module Sprites
       uri = Routes.uri(base_url, path)
 
       req = Net::HTTP::Post.new(uri)
-      req["Authorization"] = "Bearer #{@sprite.client.token}"
       req["Content-Type"] = "application/json"
       req.body = JSON.generate(body)
 

@@ -42,7 +42,12 @@ RSpec.describe "Sprites WebSocket watchers" do
     ])
     expect(Sprites::WebSocketConnection).to receive(:new).with(
       "wss://example.test/v1/sprites/demo%2Fname/ports/watch",
-      headers: { "Authorization" => "Bearer token" },
+      headers: hash_including(
+        "Authorization" => "Bearer token",
+        "User-Agent" => a_string_starting_with("sprites-ruby/"),
+        "Fly-Client-Interactive" => a_string_matching(/\A(?:true|false)\z/),
+        "Fly-Client-Parent" => a_string_matching(/\A(?:node|python|shell|other)\z/)
+      ),
       timeout: 30.0
     ).and_return(connection)
 
