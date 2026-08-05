@@ -62,6 +62,22 @@
 3. Gateway 的 `filesystem_sdk_contract_test.rb` 比较应用 raw streaming adapter 与本 SDK
    的归一化请求，禁止应用再次维护另一份字段清单。
 
+## 2026-08 官方增量审计
+
+`9dbffa1b` 到 `7aa6fab` 除 attribution 外还修改了 JS command/control 生命周期；这些不是
+新的 provider endpoint，但会影响 SDK 是否错误重放或泄漏连接。Ruby 的对应边界如下：
+
+| 官方变化 | Ruby 对应边界 | 证据 |
+|---|---|---|
+| quiet exec 必须保持连接直到 provider 给出终态 | `WsCmd#wait` 只由 exit、close 或 transport error 结束 | `cmd_spec.rb` 的 blocked command / remote completion 用例 |
+| error、buffer overflow、timeout、abort 后关闭 command socket | Ruby `WsCmd#close`/`disconnect` 关闭当前 transport；buffer/deadline 由调用方 IO 与 deadline policy 拥有 | `cmd_spec.rb` thread lifecycle；Gateway `command_runner_test.rb` |
+| control 只可在建立连接失败时回退；operation 开始后不得重放 | Ruby 仅在 pool checkout 前失败时选择 direct；`WsCmd` 的 `op.error` 保留为原 operation error | `cmd_spec.rb` control start / operation error 用例 |
+| closed control connection 不得回池复用 | checkout 先剔除 closed connection；disconnect 会关闭当前 `ControlConn` | `control_pool_spec.rb`、`cmd_spec.rb` |
+
+Ruby 不复制 JavaScript `AbortSignal` API。Gateway 在外壳层用 `CommandRunner` 管理 deadline、
+signal、session inventory 与 fail-closed；SDK 保持单一 command transport 生命周期，避免再建
+一套与宿主竞争的 timeout policy。
+
 ## HTTP exec 的协议限制
 
 官方 HTTP exec wire format 只有一个 type byte，没有 payload length，因而依赖 HTTP transport
