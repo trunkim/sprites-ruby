@@ -117,6 +117,25 @@ RSpec.describe "authenticated transport attribution" do
     control&.close
   end
 
+  it "does not apply Sprite request attribution to Fly credential minting" do
+    captured = nil
+    stub_request(:post, "https://api.sprites.dev/v1/organizations/personal/tokens")
+      .to_return do |request|
+        captured = request
+        {
+          status: 201,
+          body: JSON.generate(token: "sprite-token"),
+          headers: { "Content-Type" => "application/json" }
+        }
+      end
+
+    token = Sprites::Client.create_token("fly-macaroon", "personal")
+
+    expect(token).to eq("sprite-token")
+    expect(captured.headers.fetch("Authorization")).to eq("FlyV1 fly-macaroon")
+    expect(captured.headers.keys.grep(/\AFly-Client-/i)).to be_empty
+  end
+
   it "contains no second Bearer-header implementation outside ClientSignals" do
     source_root = File.expand_path("../../lib/sprites", __dir__)
     offenders = Dir[File.join(source_root, "**/*.rb")].filter_map do |path|
