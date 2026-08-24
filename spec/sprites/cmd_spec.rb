@@ -146,6 +146,43 @@ RSpec.describe Sprites::Cmd do
   end
 
   describe "#signal" do
+    it "capability header 缺失时仍优先通过当前 WebSocket 发送" do
+      cmd = described_class.new(sprite: sprite, name: "sleep", args: ["60"])
+      ws_cmd = instance_double(Sprites::WsCmd, signal: nil, session_id: nil)
+      cmd.instance_variable_set(:@started, true)
+      cmd.instance_variable_set(:@finished, false)
+      cmd.instance_variable_set(:@ws_cmd, ws_cmd)
+      expect(client).not_to receive(:signal_session)
+
+      expect { cmd.signal("KILL") }.not_to raise_error
+      expect(ws_cmd).to have_received(:signal).with("KILL")
+    end
+
+    it "WebSocket 不可用且有 session id 时回退 HTTP" do
+      cmd = described_class.new(sprite: sprite, name: "sleep", args: ["60"])
+      ws_cmd = instance_double(Sprites::WsCmd, session_id: "42")
+      allow(ws_cmd).to receive(:signal).and_raise(Sprites::Error, "websocket is closed")
+      cmd.instance_variable_set(:@started, true)
+      cmd.instance_variable_set(:@finished, false)
+      cmd.instance_variable_set(:@ws_cmd, ws_cmd)
+      allow(client).to receive(:signal_session)
+
+      expect { cmd.signal("KILL") }.not_to raise_error
+      expect(client).to have_received(:signal_session).with("demo", "42", "KILL")
+    end
+
+    it "WebSocket 不可用且没有 session id 时保留 transport 错误" do
+      cmd = described_class.new(sprite: sprite, name: "sleep", args: ["60"])
+      ws_cmd = instance_double(Sprites::WsCmd, session_id: nil)
+      allow(ws_cmd).to receive(:signal).and_raise(Sprites::Error, "websocket is closed")
+      cmd.instance_variable_set(:@started, true)
+      cmd.instance_variable_set(:@finished, false)
+      cmd.instance_variable_set(:@ws_cmd, ws_cmd)
+      expect(client).not_to receive(:signal_session)
+
+      expect { cmd.signal("KILL") }.to raise_error(Sprites::Error, "websocket is closed")
+    end
+
     it "ws_cmd 为 nil 时回退 HTTP，不抛 NoMethodError" do
       cmd = described_class.new(sprite: sprite, name: "sleep", args: ["60"])
       cmd.instance_variable_set(:@started, true)

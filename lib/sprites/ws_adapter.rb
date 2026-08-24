@@ -51,7 +51,7 @@ module Sprites
     # 发送 JSON 控制消息（如 resize、signal）
     def write_control(msg)
       @write_mutex.synchronize do
-        return if @closed
+        raise Error, "websocket is closed" if @closed
 
         @conn.write_text(JSON.generate(msg))
       end

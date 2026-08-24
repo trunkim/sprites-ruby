@@ -2,6 +2,7 @@
 
 require "stringio"
 require "uri"
+require "openssl"
 
 module Sprites
   # 远程命令执行器
@@ -363,20 +364,28 @@ module Sprites
     end
 
     # 发送信号给远程进程
-    # 优先通过 WebSocket 发送，不支持时回退到 HTTP POST
+    # 优先通过当前 WebSocket 发送；只有 transport 已不可用时才回退到
+    # 带 session id 的 HTTP endpoint。普通（非 detachable）exec 不保证返回
+    # session_info，因此 capability header 缺失不能作为跳过 WebSocket 的依据。
     # @param sig [String] 信号名（INT, TERM, HUP, KILL, QUIT, USR1, USR2）
     def signal(sig)
       @mutex.synchronize do
         raise Error, "sprite: Signal before process started" unless @started
         raise Error, "sprite: Signal after process finished" if @finished
 
-        # @ws_cmd 可能已断开为 nil；不得对 nil 调 has_capability?（Gateway 曾因此 NoMethodError）。
-        if @ws_cmd&.has_capability?("signal")
-          return @ws_cmd.signal(sig)
+        websocket_error = nil
+        if @ws_cmd
+          begin
+            return @ws_cmd.signal(sig)
+          rescue Error, IOError, SystemCallError, OpenSSL::SSL::SSLError => error
+            websocket_error = error
+          end
         end
 
-        # HTTP 回退
+        # HTTP 回退只适用于 attach/detachable session。新建 exec 没有 id 时，
+        # 保留 WebSocket transport 的原始错误，避免把协议失败伪装成缺少参数。
         sess_id = @session_id || @ws_cmd&.session_id
+        raise websocket_error if websocket_error && !sess_id
         raise Error, "sprite: no session ID for HTTP signal fallback" unless sess_id
 
         @sprite.client.signal_session(@sprite.name, sess_id, sig)

@@ -224,3 +224,15 @@ RSpec.describe Sprites::WebSocketConnection do
     server&.close
   end
 end
+
+RSpec.describe Sprites::WsAdapter do
+  it "does not silently accept a control message after close" do
+    connection = instance_double(Sprites::WebSocketConnection, close: nil)
+    adapter = described_class.new(connection, false)
+    adapter.close
+    expect(connection).not_to receive(:write_text)
+
+    expect { adapter.write_control(type: "signal", signal: "KILL") }
+      .to raise_error(Sprites::Error, "websocket is closed")
+  end
+end
