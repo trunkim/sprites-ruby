@@ -8,6 +8,7 @@ require "socket"
 require "io/wait"
 require "base64"
 require "digest/sha1"
+require "securerandom"
 
 module Sprites
   # ── WebSocket 二进制帧中的流 ID 常量 ──
@@ -109,7 +110,13 @@ module Sprites
 
     attr_reader :socket, :capabilities, :response_headers
 
-    def initialize(uri, headers: {}, timeout: 30)
+    def initialize(
+      uri,
+      headers: {},
+      timeout: 30,
+      ping_interval: WS_PING_INTERVAL,
+      pong_wait: WS_PONG_WAIT
+    )
       @uri = URI(uri)
       unless %w[ws wss].include?(@uri.scheme) && @uri.host
         raise ArgumentError, "WebSocket URI must use ws or wss and include a host"
@@ -119,9 +126,18 @@ module Sprites
       validate_request_headers!
       @timeout = Float(timeout)
       raise ArgumentError, "timeout must be > 0" unless @timeout.positive? && @timeout.finite?
+      @ping_interval = positive_finite_duration(ping_interval, "ping_interval")
+      @pong_wait = positive_finite_duration(pong_wait, "pong_wait")
       @read_mutex = Mutex.new
       @write_mutex = Mutex.new
       @state_mutex = Mutex.new
+      @keepalive_mutex = Mutex.new
+      @keepalive_condition = ConditionVariable.new
+      @keepalive_stop = true
+      @keepalive_thread = nil
+      @pending_ping_payload = nil
+      @pending_ping_at = nil
+      @next_ping_at = nil
       @closed = false
       @capabilities = {}
       @response_headers = {}
@@ -138,6 +154,7 @@ module Sprites
       @socket = create_socket
       perform_handshake
       parse_capabilities
+      start_keepalive
       self
     rescue StandardError
       close_socket
@@ -180,17 +197,18 @@ module Sprites
     # 优雅关闭：发送 close 帧后关闭 socket
     def close
       @write_mutex.synchronize do
-        return if closed?
-
-        begin
-          write_frame_unlocked(0x08, [1000].pack("n")) if @socket && !@socket.closed?
-        rescue IOError, SystemCallError, OpenSSL::SSL::SSLError
-          nil
-        ensure
-          mark_closed
+        unless closed?
+          begin
+            write_frame_unlocked(0x08, [1000].pack("n")) if @socket && !@socket.closed?
+          rescue IOError, SystemCallError, OpenSSL::SSL::SSLError
+            nil
+          ensure
+            mark_closed
+          end
         end
       end
       close_socket
+      join_keepalive
     end
 
     def closed?
@@ -352,7 +370,7 @@ module Sprites
           when 0x09
             write_frame(0x0A, payload)
           when 0x0A
-            nil
+            acknowledge_pong(payload)
           else
             raise Error, format("unsupported WebSocket control opcode 0x%02x", opcode)
           end
@@ -383,7 +401,7 @@ module Sprites
         end
         return [:binary, message]
       end
-    rescue IOError, Errno::ECONNRESET, OpenSSL::SSL::SSLError
+    rescue IOError, SystemCallError, OpenSSL::SSL::SSLError
       mark_closed
       nil
     rescue Sprites::Error
@@ -541,8 +559,110 @@ module Sprites
         code.between?(3000, 4999)
     end
 
+    # 每条 WebSocket 自己维护 transport liveness。业务调用方只需要处理连接关闭，
+    # 不需要发送空命令或访问 socket 私有状态。任一时刻最多保留一个待确认 ping；
+    # 缺少匹配 pong 时主动关闭 socket，唤醒阻塞 reader 并把半开连接变成有界故障。
+    def start_keepalive
+      @keepalive_mutex.synchronize do
+        return if @keepalive_thread&.alive?
+
+        @keepalive_stop = false
+        @pending_ping_payload = nil
+        @pending_ping_at = nil
+        @next_ping_at = monotonic_now + @ping_interval
+        @keepalive_thread = Thread.new { keepalive_loop }
+        @keepalive_thread.report_on_exception = false
+      end
+    end
+
+    def keepalive_loop
+      loop do
+        action, payload = next_keepalive_action
+        break if action == :stop
+
+        if action == :timeout
+          close_socket
+          break
+        end
+
+        write_ping(payload)
+      end
+    rescue IOError, SystemCallError, OpenSSL::SSL::SSLError, Sprites::Error
+      close_socket
+    ensure
+      @keepalive_mutex.synchronize do
+        @keepalive_stop = true
+        @keepalive_thread = nil if @keepalive_thread.equal?(Thread.current)
+        @keepalive_condition.broadcast
+      end
+    end
+
+    def next_keepalive_action
+      @keepalive_mutex.synchronize do
+        loop do
+          return [:stop, nil] if @keepalive_stop
+
+          now = monotonic_now
+          if @pending_ping_payload
+            return [:timeout, nil] if now - @pending_ping_at >= @pong_wait
+
+            wait_for = @pong_wait - (now - @pending_ping_at)
+          elsif now >= @next_ping_at
+            payload = SecureRandom.random_bytes(8)
+            @pending_ping_payload = payload
+            @pending_ping_at = now
+            return [:ping, payload]
+          else
+            wait_for = @next_ping_at - now
+          end
+
+          @keepalive_condition.wait(@keepalive_mutex, wait_for)
+        end
+      end
+    end
+
+    def acknowledge_pong(payload)
+      @keepalive_mutex.synchronize do
+        return unless @pending_ping_payload == payload
+
+        @pending_ping_payload = nil
+        @pending_ping_at = nil
+        @next_ping_at = monotonic_now + @ping_interval
+        @keepalive_condition.broadcast
+      end
+    end
+
+    def request_keepalive_stop
+      @keepalive_mutex.synchronize do
+        @keepalive_stop = true
+        @keepalive_condition.broadcast
+      end
+    end
+
+    def join_keepalive
+      thread = @keepalive_mutex.synchronize { @keepalive_thread }
+      return unless thread && !thread.equal?(Thread.current)
+
+      thread.join
+    end
+
+    def positive_finite_duration(value, name)
+      duration = Float(value)
+      unless duration.positive? && duration.finite?
+        raise ArgumentError, "#{name} must be > 0"
+      end
+
+      duration
+    end
+
     def mark_closed
-      @state_mutex.synchronize { @closed = true }
+      changed = @state_mutex.synchronize do
+        next false if @closed
+
+        @closed = true
+        true
+      end
+      request_keepalive_stop if changed
     end
 
     def close_socket

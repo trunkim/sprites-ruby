@@ -4,11 +4,12 @@ require "spec_helper"
 require "socket"
 
 RSpec.describe Sprites::WebSocketConnection do
-  def connect_pair(valid_accept: true, extra_headers: {}, url: nil, request_sink: nil)
+  def connect_pair(valid_accept: true, extra_headers: {}, url: nil, request_sink: nil, **connection_options)
     client_socket, server_socket = Socket.pair(:UNIX, :STREAM, 0)
     connection = described_class.new(
       url || "ws://example.test/v1/sprites/demo/exec",
-      timeout: 1
+      timeout: 1,
+      **connection_options
     )
     allow(connection).to receive(:create_socket).and_return(client_socket)
     server_thread = Thread.new do
@@ -139,6 +140,48 @@ RSpec.describe Sprites::WebSocketConnection do
 
     expect(connection.read_message).to eq([:text, "hello"])
     expect(read_client_frame(server)).to eq([0x0A, "ping"])
+  ensure
+    connection&.close
+    server&.close
+  end
+
+  it "keeps a connection alive when the peer answers the client ping" do
+    connection, server = connect_pair(ping_interval: 0.01, pong_wait: 0.08)
+    reader = Thread.new { connection.read_message }
+
+    opcode, payload = read_client_frame(server)
+    expect(opcode).to eq(0x09)
+    server.write(server_frame(0x0A, payload))
+    sleep(0.02)
+
+    expect(connection).not_to be_closed
+  ensure
+    connection&.close
+    reader&.join(0.2)
+    server&.close
+  end
+
+  it "bounds a half-open connection and wakes a blocked reader when pong is missing" do
+    connection, server = connect_pair(ping_interval: 0.01, pong_wait: 0.03)
+    reader = Thread.new { connection.read_message }
+
+    expect(read_client_frame(server).first).to eq(0x09)
+    expect(reader.join(0.3)).to eq(reader)
+    expect(reader.value).to be_nil
+    expect(connection).to be_closed
+  ensure
+    connection&.close
+    reader&.join(0.2)
+    server&.close
+  end
+
+  it "stops its keepalive thread when closed" do
+    connection, server = connect_pair(ping_interval: 1, pong_wait: 1)
+    keepalive = connection.instance_variable_get(:@keepalive_thread)
+
+    connection.close
+
+    expect(keepalive).not_to be_alive
   ensure
     connection&.close
     server&.close
