@@ -14,6 +14,7 @@ RSpec.describe "official JS SDK equivalent public surface" do
       :delete_sprite, :upgrade_sprite, :restart_sprite, :check_sprite,
       :update_url_settings, :update_sprite
     )
+    expect(client).to respond_to(:list_tasks, :get_task, :upsert_task, :delete_task)
     expect(Sprites::Client).to respond_to(:create_token)
   end
 
@@ -21,6 +22,7 @@ RSpec.describe "official JS SDK equivalent public surface" do
     expect(sprite).to respond_to(
       :command, :create_session, :attach_session, :list_sessions, :kill_session,
       :exec_file_http, :watch_ports,
+      :tasks, :task, :hold, :release,
       :create_checkpoint, :list_checkpoints, :get_checkpoint, :restore_checkpoint,
       :list_services, :get_service, :create_service, :delete_service,
       :start_service, :stop_service, :restart_service, :get_service_logs, :service_logs, :signal_service,

@@ -29,6 +29,7 @@ module Sprites
     include Sessions     # list/attach sessions
     include Checkpoints  # create/list/get/restore checkpoints
     include Services     # CRUD services, start/stop/signal
+    include Tasks        # activity holds (Tasks API over management socket)
     include Policy       # get/update network/privileges/resources policy
     include Proxy        # port forwarding, socket proxy
 

@@ -65,6 +65,27 @@ module Sprites
       client.delete_sprite(name)
     end
 
+    # ── activity holds（Tasks API） ──
+
+    # @return [Array<SpriteTask>]
+    def tasks
+      client.list_tasks(name)
+    end
+
+    def task(task_name)
+      client.get_task(name, task_name)
+    end
+
+    # 创建或续期 hold；expire 最长 1 小时。
+    # @return [SpriteTask]
+    def hold(name:, expire: "1h")
+      client.upsert_task(name, name: name, expire: expire)
+    end
+
+    def release(name:)
+      client.delete_task(name, name: name)
+    end
+
     # 升级此 sprite 到最新版本
     def upgrade(_ctx = nil)
       client.upgrade_sprite(name)

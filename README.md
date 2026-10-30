@@ -263,6 +263,27 @@ sprite.start_service("web")
 sprite.stop_service("web")
 ```
 
+### Activity Holds (Tasks API)
+
+A Sprite pauses about 30 seconds after activity stops. Long-running agent or worker
+loops that idle between steps must hold the Sprite active or connections will drop
+and processes freeze:
+
+```ruby
+# Hold for up to one hour (upsert is idempotent, so refreshing is safe)
+sprite.hold(name: "run-#{run_id}", expire: "1h")
+
+# Long work: refresh with a shorter expiry before it lapses
+sprite.hold(name: "run-#{run_id}", expire: "5m")
+
+# Inspect and release
+sprite.tasks.each { |task| puts "#{task.name} until #{task.expires_at}" }
+sprite.release(name: "run-#{run_id}")
+```
+
+Holds live on the Sprite's management socket; the SDK invokes them through the
+exec plane. They expire on their own if the holder crashes.
+
 ### Port Forwarding
 
 ```ruby
