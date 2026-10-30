@@ -38,6 +38,28 @@ module Sprites
     end
   end
 
+  # Sprite activity hold（Tasks API）。expires_at 为空表示服务未返回过期时间。
+  SpriteTask = Data.define(:name, :started_at, :expires_at) do
+    def initialize(name:, started_at: nil, expires_at: nil)
+      super
+    end
+
+    def expired?(now = Time.now) = expires_at && expires_at <= now
+
+    def self.from_hash(hash)
+      return nil unless hash
+
+      new(
+        name: hash["name"],
+        started_at: parse_time(hash["started_at"]),
+        expires_at: parse_time(hash["expires_at"])
+      )
+    end
+
+    def self.parse_time(value) = value ? Time.parse(value.to_s) : nil
+    private_class_method :parse_time
+  end
+
   # Sprite URL 访问认证设置
   URLSettings = Data.define(:auth, :private_access) do
     def initialize(auth: nil, private_access: nil)
